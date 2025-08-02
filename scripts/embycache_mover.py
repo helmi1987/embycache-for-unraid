@@ -327,8 +327,8 @@ except Exception as e:
     log.error("Konnte DB nicht löschen: %s", e)
 
 # ───────────────────── Ausführen ─────────────────────────────────────
-cnt1, sz1 = run_jobs(array2cache_jobs, MAX_CACHE)
 cnt2, sz2 = run_jobs(cache2array_jobs, MAX_ARRAY)
+cnt1, sz1 = run_jobs(array2cache_jobs, MAX_CACHE)
 
 # TXT‑Dateien nach Erfolg bereinigen (nur verarbeitete Zeilen entfernen)
 
@@ -343,8 +343,8 @@ def update_txt(fn: Path, processed_sources: List[str]):
     except Exception as e:
         log.error("Fehler beim Aktualisieren %s: %s", fn.name, e)
 
-update_txt(A2C_TXT, [s for s, _ in array2cache_jobs])
 update_txt(C2A_TXT, [s for s, _ in cache2array_jobs])
+update_txt(A2C_TXT, [s for s, _ in array2cache_jobs])
 
 # Zusammenfassung
 log.info("===== Zusammenfassung =====")
