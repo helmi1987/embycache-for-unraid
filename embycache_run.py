@@ -48,29 +48,55 @@ class EmbyCache:
             if size < 1024: return f"{size:.2f} {unit}"
             size /= 1024
 
+    def is_protected_root_folder(self, folder_path, base_path):
+        """Prüft, ob ein Ordner ein geschützter Hauptordner (Library Root) ist."""
+        try:
+            # Relativer Pfad zur Basis (z.B. /mnt/cache -> Serien)
+            rel = Path(folder_path).relative_to(base_path)
+            # Wenn der relative Pfad nur 1 Ebene hat (z.B. "Filme" oder "Serien"), ist es ein Root
+            if len(rel.parts) <= 1:
+                return True
+        except ValueError:
+            pass # Pfad passt nicht zur Basis
+        return False
+
     def clean_empty_dirs(self):
-        # Reinigt leere Ordner auf dem ARRAY (Standard Logik)
+        # Reinigt leere Ordner auf dem ARRAY
         if not self.run_mode: return
-        targets = [self.config["array_path"]]
+        
+        base_path = self.config["array_path"] # z.B. /mnt/user0
+        targets = [base_path]
+        
+        # Schutzliste erstellen
         protected = set()
         for _, host_p in self.config.get("path_mappings", {}).items():
             if host_p.startswith("/mnt/user"):
                 suffix = host_p.replace("/mnt/user", "")
-                protected.add(str(Path(self.config["array_path"]) / suffix.strip("/")))
+                protected.add(str(Path(base_path) / suffix.strip("/")))
         
-        for base_path in targets:
-            if not os.path.exists(base_path): continue
-            for root, dirs, files in os.walk(base_path, topdown=False):
-                if root in protected or root == base_path: continue
-                if Path(root).parent == Path(base_path) and any(l in Path(root).name for l in self.config["libraries"]): continue
-                if not dirs and not files:
-                    try: os.rmdir(root)
-                    except: pass
+        if not os.path.exists(base_path): return
+
+        for root, dirs, files in os.walk(base_path, topdown=False):
+            # Überspringe den Basis-Ordner selbst
+            if root == base_path: continue
+            
+            # SCHUTZ 1: Explizite Mappings
+            if root in protected: continue
+
+            # SCHUTZ 2: Genereller Root-Schutz (z.B. /mnt/user0/Filme)
+            if self.is_protected_root_folder(root, base_path):
+                continue
+            
+            if not dirs and not files:
+                try: os.rmdir(root)
+                except: pass
 
     def cleanup_moved_source_dirs(self, file_list):
-        """Reinigt leere Ordner auf dem CACHE, basierend auf den verschobenen Dateien."""
+        """Reinigt leere Ordner auf dem CACHE mit Root-Protection."""
         if not file_list: return
         
+        cache_base = self.config["cache_path"] # z.B. /mnt/cache
+
         # 1. Ermittle alle betroffenen Eltern-Ordner auf dem Cache
         dirs_to_check = set()
         for file_path in file_list:
@@ -78,7 +104,7 @@ class EmbyCache:
             if os.path.exists(parent_dir):
                 dirs_to_check.add(parent_dir)
 
-        # 2. Sortiere nach Länge absteigend (tiefste Ordner zuerst löschen: S01 vor Serie)
+        # 2. Sortiere nach Länge absteigend (tiefste zuerst)
         sorted_dirs = sorted(list(dirs_to_check), key=len, reverse=True)
 
         if not sorted_dirs: return
@@ -87,27 +113,28 @@ class EmbyCache:
         
         cleaned_count = 0
         for d in sorted_dirs:
-            # Sicherheitscheck: Nicht zu weit oben löschen (/mnt/cache)
-            if len(Path(d).parts) < 4: continue
+            # SCHUTZ: Ist es ein Hauptordner? (z.B. /mnt/cache/Serien)
+            if self.is_protected_root_folder(d, cache_base):
+                log.info(f"Behalte Hauptordner: {d}")
+                continue
+
+            # Sicherheitscheck: Nicht /mnt/cache selbst löschen
+            if d == cache_base: continue
 
             try:
-                # os.rmdir löscht NUR wenn der Ordner leer ist (Atomar & Sicher)
-                # Das entspricht 'find -empty -delete' Logik, aber präziser für genau diese Pfade.
                 os.rmdir(d)
                 log.info(f"Leerordner gelöscht: {d}")
                 cleaned_count += 1
                 
-                # Optional: Versuchen, auch den darüberliegenden Ordner zu löschen (rekursiv nach oben)
-                # Falls wir den letzten Staffelordner gelöscht haben, ist evtl. der Serienordner leer.
+                # Rekursiv nach oben prüfen (aber stoppen vor Root)
                 parent = os.path.dirname(d)
-                if len(Path(parent).parts) >= 4:
+                if not self.is_protected_root_folder(parent, cache_base) and parent != cache_base:
                     try:
                         os.rmdir(parent)
-                        log.info(f"Eltern-Ordner (Serie) auch gelöscht: {parent}")
-                    except OSError: pass # War nicht leer
+                        log.info(f"Eltern-Ordner auch gelöscht: {parent}")
+                    except OSError: pass
             except OSError:
-                # Ordner war nicht leer (Mover hat evtl. was dagelassen oder neue Datei kam rein)
-                pass
+                pass # Nicht leer
                 
         if cleaned_count > 0:
             log.info(f"{cleaned_count} leere Verzeichnisse vom Cache entfernt.")
@@ -284,8 +311,9 @@ class EmbyCache:
         paths_str = "\n".join(file_list) + "\n"
         
         try:
+            # MOVER OHNE DEBUG FLAG (-d 1 ENTFERNT)
             process = subprocess.Popen(
-                [self.mover_bin, "-d", "1"],
+                [self.mover_bin],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -297,9 +325,7 @@ class EmbyCache:
                 log.error(f"Unraid Mover Fehler (Code {process.returncode}): {stderr}")
             else:
                 log.info("Unraid Mover erfolgreich ausgeführt.")
-                
-                # NEU: Cache Cleanup nach Mover
-                # Da Mover fertig ist (communicate wartet), können wir jetzt aufräumen.
+                # Cache Cleanup nach Mover
                 self.cleanup_moved_source_dirs(file_list)
 
         except Exception as e:
