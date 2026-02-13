@@ -1,5 +1,3 @@
- EmbyCache Dokumentation body { font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; } h1, h2, h3 { color: #333; } code { background-color: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: monospace; } pre { background-color: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; border: 1px solid #ddd; } hr { border: 0; border-top: 1px solid #ccc; margin: 20px 0; } ul { margin-bottom: 20px; }
-
 # EmbyCache - Intelligentes Medien-Caching für Unraid
 
 **EmbyCache** ist eine Skript-Sammlung für Unraid, die Medien basierend auf dem Nutzerverhalten von Emby (oder Jellyfin) proaktiv vom Array auf den schnellen Cache (SSD/NVMe) verschiebt. Es sorgt dafür, dass angefangene Filme und die nächsten Episoden einer Serie sofort ohne "Spin-up"-Verzögerung abspielbar sind.
