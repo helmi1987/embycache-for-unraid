@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, logging, subprocess, argparse, shutil
+import os, sys, json, logging, subprocess, argparse, shutil, time
 from pathlib import Path
 from datetime import datetime
 
@@ -18,7 +18,7 @@ class EmbyCache:
         self.stats = {"to_cache_bytes": 0, "to_array_bytes": 0}
         self.previous_exclude_list = self.load_previous_exclude()
         self.origin_data = self.load_origin_data()
-        self.mover_bin = self.detect_mover_bin() # NEU: Binary finden
+        self.mover_bin = self.detect_mover_bin()
 
     def load_config(self):
         p = Path("embycache_settings.json")
@@ -39,7 +39,6 @@ class EmbyCache:
         except: return {}
 
     def detect_mover_bin(self):
-        # Prüft Unraid 7 vs 6 Pfad
         if os.path.exists("/usr/libexec/unraid/move"):
             return "/usr/libexec/unraid/move"
         return "/usr/local/bin/move"
@@ -50,6 +49,7 @@ class EmbyCache:
             size /= 1024
 
     def clean_empty_dirs(self):
+        # Reinigt leere Ordner auf dem ARRAY (Standard Logik)
         if not self.run_mode: return
         targets = [self.config["array_path"]]
         protected = set()
@@ -66,6 +66,51 @@ class EmbyCache:
                 if not dirs and not files:
                     try: os.rmdir(root)
                     except: pass
+
+    def cleanup_moved_source_dirs(self, file_list):
+        """Reinigt leere Ordner auf dem CACHE, basierend auf den verschobenen Dateien."""
+        if not file_list: return
+        
+        # 1. Ermittle alle betroffenen Eltern-Ordner auf dem Cache
+        dirs_to_check = set()
+        for file_path in file_list:
+            parent_dir = os.path.dirname(file_path)
+            if os.path.exists(parent_dir):
+                dirs_to_check.add(parent_dir)
+
+        # 2. Sortiere nach Länge absteigend (tiefste Ordner zuerst löschen: S01 vor Serie)
+        sorted_dirs = sorted(list(dirs_to_check), key=len, reverse=True)
+
+        if not sorted_dirs: return
+        
+        log.info(f"Prüfe {len(sorted_dirs)} Quell-Ordner auf dem Cache auf Leere...")
+        
+        cleaned_count = 0
+        for d in sorted_dirs:
+            # Sicherheitscheck: Nicht zu weit oben löschen (/mnt/cache)
+            if len(Path(d).parts) < 4: continue
+
+            try:
+                # os.rmdir löscht NUR wenn der Ordner leer ist (Atomar & Sicher)
+                # Das entspricht 'find -empty -delete' Logik, aber präziser für genau diese Pfade.
+                os.rmdir(d)
+                log.info(f"Leerordner gelöscht: {d}")
+                cleaned_count += 1
+                
+                # Optional: Versuchen, auch den darüberliegenden Ordner zu löschen (rekursiv nach oben)
+                # Falls wir den letzten Staffelordner gelöscht haben, ist evtl. der Serienordner leer.
+                parent = os.path.dirname(d)
+                if len(Path(parent).parts) >= 4:
+                    try:
+                        os.rmdir(parent)
+                        log.info(f"Eltern-Ordner (Serie) auch gelöscht: {parent}")
+                    except OSError: pass # War nicht leer
+            except OSError:
+                # Ordner war nicht leer (Mover hat evtl. was dagelassen oder neue Datei kam rein)
+                pass
+                
+        if cleaned_count > 0:
+            log.info(f"{cleaned_count} leere Verzeichnisse vom Cache entfernt.")
 
     def get_host_path(self, docker_path):
         mappings = self.config.get("path_mappings", {})
@@ -215,7 +260,6 @@ class EmbyCache:
         return playing
 
     def robust_move(self, src, dst):
-        # Diese Funktion wird NUR noch für Array -> Cache genutzt
         src_p = Path(src); dst_p = Path(dst)
         if not dst_p.parent.exists():
             dst_p.parent.mkdir(parents=True, exist_ok=True)
@@ -236,16 +280,12 @@ class EmbyCache:
             return False
 
     def execute_unraid_mover(self, file_list):
-        """Pusht eine Liste von Dateien via Pipe an den Unraid Mover binary."""
         if not file_list: return
-        
-        # Pfad-String für die Pipe vorbereiten (ein Pfad pro Zeile)
         paths_str = "\n".join(file_list) + "\n"
         
         try:
-            # Wir rufen den mover auf und füttern ihn via stdin
             process = subprocess.Popen(
-                [self.mover_bin],
+                [self.mover_bin, "-d", "1"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -257,6 +297,11 @@ class EmbyCache:
                 log.error(f"Unraid Mover Fehler (Code {process.returncode}): {stderr}")
             else:
                 log.info("Unraid Mover erfolgreich ausgeführt.")
+                
+                # NEU: Cache Cleanup nach Mover
+                # Da Mover fertig ist (communicate wartet), können wir jetzt aufräumen.
+                self.cleanup_moved_source_dirs(file_list)
+
         except Exception as e:
             log.error(f"Fehler beim Ausführen des Movers: {e}")
 
@@ -274,7 +319,7 @@ class EmbyCache:
             free_pct = (stat.free / stat.total) * 100
         except: free_pct = 0
 
-        # --- PHASE 1: ARRAY -> CACHE (Bleibt Rsync) ---
+        # --- PHASE 1: ARRAY -> CACHE ---
         if free_pct > self.config["min_free_percent"]:
             for prio, src_p, reason in on_deck_data:
                 src = str(src_p)
@@ -294,7 +339,6 @@ class EmbyCache:
                         self.stats["to_cache_bytes"] += size
                         log.info(f"[PLAN: -> CACHE ({reason})] {src_p.name} ({self.format_size(size)})")
                         
-                        # Origin tracken (für späteres Debugging oder falls wir zurück zu rsync wechseln)
                         real_disk_path = self.find_real_disk_path(str(arr_src))
                         self.origin_data[str(cache_dst)] = real_disk_path
 
@@ -317,25 +361,21 @@ class EmbyCache:
                 current_on_deck_paths.add(str(old_cache_p)) 
                 continue
             
-            # Wir nutzen den Unraid Mover, also geben wir den Cache-Pfad an
             size = os.path.getsize(old_cache_p)
             self.stats["to_array_bytes"] += size
             log.info(f"[PLAN: -> ARRAY (Gesehen)] {old_cache_p.name} ({self.format_size(size)}) [via Mover]")
             
             files_to_move_back.append(str(old_cache_p))
             
-            # Eintrag aus Origin-DB entfernen, da File nun weggeht
             if self.run_mode:
                 self.origin_data.pop(str(old_cache_p), None)
 
-        # Bulk Move ausführen
         if self.run_mode and files_to_move_back:
             self.execute_unraid_mover(files_to_move_back)
 
         self.clean_empty_dirs()
         log.info(f"Statistik: In: {self.format_size(self.stats['to_cache_bytes'])} | Out: {self.format_size(self.stats['to_array_bytes'])}")
         
-        # --- PHASE 3: SAVE LISTS ---
         if self.run_mode:
             try: 
                 self.exclude_file.write_text("\n".join(current_on_deck_paths), encoding="utf-8")
