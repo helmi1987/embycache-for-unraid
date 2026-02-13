@@ -49,15 +49,23 @@ class EmbyCache:
             size /= 1024
 
     def is_protected_root_folder(self, folder_path, base_path):
-        """Prüft, ob ein Ordner ein geschützter Hauptordner (Library Root) ist."""
+        """
+        Entspricht der Logik 'find base_path -maxdepth 1'.
+        Prüft, ob ein Ordner ein direkter Unterordner des Basis-Pfads ist (z.B. 'Filme').
+        Wenn ja, ist er geschützt.
+        """
         try:
-            # Relativer Pfad zur Basis (z.B. /mnt/cache -> Serien)
+            # Berechne den relativen Pfad zur Basis
+            # Bsp: folder=/mnt/cache/Filme, base=/mnt/cache -> rel=Filme
             rel = Path(folder_path).relative_to(base_path)
-            # Wenn der relative Pfad nur 1 Ebene hat (z.B. "Filme" oder "Serien"), ist es ein Root
+            
+            # Wenn der relative Pfad 0 Teile hat (es ist der Basis-Ordner selbst)
+            # oder nur 1 Teil hat (es ist ein direkter Unterordner wie 'Filme'), ist es geschützt.
             if len(rel.parts) <= 1:
                 return True
         except ValueError:
-            pass # Pfad passt nicht zur Basis
+            # Pfad liegt gar nicht im Basis-Ordner (sollte nicht passieren, aber sicher ist sicher)
+            pass
         return False
 
     def clean_empty_dirs(self):
@@ -65,9 +73,8 @@ class EmbyCache:
         if not self.run_mode: return
         
         base_path = self.config["array_path"] # z.B. /mnt/user0
-        targets = [base_path]
         
-        # Schutzliste erstellen
+        # Explizite Schutzliste aus Config Mappings
         protected = set()
         for _, host_p in self.config.get("path_mappings", {}).items():
             if host_p.startswith("/mnt/user"):
@@ -77,13 +84,10 @@ class EmbyCache:
         if not os.path.exists(base_path): return
 
         for root, dirs, files in os.walk(base_path, topdown=False):
-            # Überspringe den Basis-Ordner selbst
             if root == base_path: continue
-            
-            # SCHUTZ 1: Explizite Mappings
             if root in protected: continue
 
-            # SCHUTZ 2: Genereller Root-Schutz (z.B. /mnt/user0/Filme)
+            # SCHUTZ (Maxdepth 1 Logik)
             if self.is_protected_root_folder(root, base_path):
                 continue
             
@@ -92,7 +96,7 @@ class EmbyCache:
                 except: pass
 
     def cleanup_moved_source_dirs(self, file_list):
-        """Reinigt leere Ordner auf dem CACHE mit Root-Protection."""
+        """Reinigt leere Ordner auf dem CACHE mit striktem Root-Schutz."""
         if not file_list: return
         
         cache_base = self.config["cache_path"] # z.B. /mnt/cache
@@ -104,7 +108,7 @@ class EmbyCache:
             if os.path.exists(parent_dir):
                 dirs_to_check.add(parent_dir)
 
-        # 2. Sortiere nach Länge absteigend (tiefste zuerst)
+        # 2. Sortiere nach Länge absteigend (tiefste zuerst löschen)
         sorted_dirs = sorted(list(dirs_to_check), key=len, reverse=True)
 
         if not sorted_dirs: return
@@ -113,22 +117,21 @@ class EmbyCache:
         
         cleaned_count = 0
         for d in sorted_dirs:
-            # SCHUTZ: Ist es ein Hauptordner? (z.B. /mnt/cache/Serien)
+            # SCHUTZ: Entspricht 'find /mnt/cache -maxdepth 1'
+            # Wenn es ein Hauptordner ist (z.B. /mnt/cache/Serien), ÜBERSPRINGEN.
             if self.is_protected_root_folder(d, cache_base):
-                log.info(f"Behalte Hauptordner: {d}")
+                log.info(f"Behalte geschützten Hauptordner: {d}")
                 continue
-
-            # Sicherheitscheck: Nicht /mnt/cache selbst löschen
-            if d == cache_base: continue
 
             try:
                 os.rmdir(d)
                 log.info(f"Leerordner gelöscht: {d}")
                 cleaned_count += 1
                 
-                # Rekursiv nach oben prüfen (aber stoppen vor Root)
+                # Rekursiv nach oben prüfen
                 parent = os.path.dirname(d)
-                if not self.is_protected_root_folder(parent, cache_base) and parent != cache_base:
+                # Auch beim Parent prüfen: Ist es ein geschützter Root? Wenn nein, versuche löschen.
+                if not self.is_protected_root_folder(parent, cache_base):
                     try:
                         os.rmdir(parent)
                         log.info(f"Eltern-Ordner auch gelöscht: {parent}")
@@ -311,9 +314,8 @@ class EmbyCache:
         paths_str = "\n".join(file_list) + "\n"
         
         try:
-            # MOVER OHNE DEBUG FLAG (-d 1 ENTFERNT)
             process = subprocess.Popen(
-                [self.mover_bin],
+                [self.mover_bin], # Standard Mover (leise)
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -325,7 +327,6 @@ class EmbyCache:
                 log.error(f"Unraid Mover Fehler (Code {process.returncode}): {stderr}")
             else:
                 log.info("Unraid Mover erfolgreich ausgeführt.")
-                # Cache Cleanup nach Mover
                 self.cleanup_moved_source_dirs(file_list)
 
         except Exception as e:
@@ -413,5 +414,4 @@ class EmbyCache:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(); parser.add_argument("--run", action="store_true"); args = parser.parse_args()
-    try: import requests; EmbyCache(run_mode=args.run).run()
-    except ImportError: print("Fehler: pip install requests")
+    try: import requests
