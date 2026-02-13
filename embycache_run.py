@@ -245,7 +245,7 @@ class EmbyCache:
         try:
             # Wir rufen den mover auf und füttern ihn via stdin
             process = subprocess.Popen(
-                [self.mover_bin],
+                [self.mover_bin, "-d", "1"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
