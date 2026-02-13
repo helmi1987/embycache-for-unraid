@@ -55,16 +55,10 @@ class EmbyCache:
         Wenn ja, ist er geschützt.
         """
         try:
-            # Berechne den relativen Pfad zur Basis
-            # Bsp: folder=/mnt/cache/Filme, base=/mnt/cache -> rel=Filme
             rel = Path(folder_path).relative_to(base_path)
-            
-            # Wenn der relative Pfad 0 Teile hat (es ist der Basis-Ordner selbst)
-            # oder nur 1 Teil hat (es ist ein direkter Unterordner wie 'Filme'), ist es geschützt.
             if len(rel.parts) <= 1:
                 return True
         except ValueError:
-            # Pfad liegt gar nicht im Basis-Ordner (sollte nicht passieren, aber sicher ist sicher)
             pass
         return False
 
@@ -74,7 +68,6 @@ class EmbyCache:
         
         base_path = self.config["array_path"] # z.B. /mnt/user0
         
-        # Explizite Schutzliste aus Config Mappings
         protected = set()
         for _, host_p in self.config.get("path_mappings", {}).items():
             if host_p.startswith("/mnt/user"):
@@ -118,7 +111,6 @@ class EmbyCache:
         cleaned_count = 0
         for d in sorted_dirs:
             # SCHUTZ: Entspricht 'find /mnt/cache -maxdepth 1'
-            # Wenn es ein Hauptordner ist (z.B. /mnt/cache/Serien), ÜBERSPRINGEN.
             if self.is_protected_root_folder(d, cache_base):
                 log.info(f"Behalte geschützten Hauptordner: {d}")
                 continue
@@ -130,7 +122,6 @@ class EmbyCache:
                 
                 # Rekursiv nach oben prüfen
                 parent = os.path.dirname(d)
-                # Auch beim Parent prüfen: Ist es ein geschützter Root? Wenn nein, versuche löschen.
                 if not self.is_protected_root_folder(parent, cache_base):
                     try:
                         os.rmdir(parent)
@@ -315,7 +306,7 @@ class EmbyCache:
         
         try:
             process = subprocess.Popen(
-                [self.mover_bin], # Standard Mover (leise)
+                [self.mover_bin], 
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -413,5 +404,12 @@ class EmbyCache:
             log.info("[DRY-RUN] Listen wurden NICHT aktualisiert.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(); parser.add_argument("--run", action="store_true"); args = parser.parse_args()
-    try: import requests
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run", action="store_true")
+    args = parser.parse_args()
+
+    try:
+        import requests
+        EmbyCache(run_mode=args.run).run()
+    except ImportError:
+        print("Fehler: Das Modul 'requests' fehlt. Bitte mit 'pip install requests' installieren.")
