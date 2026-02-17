@@ -125,10 +125,10 @@ Das Skript arbeitet strikt sequenziell, um Datenverlust oder volle Caches zu ver
 
 | Phase | Aktion | Beschreibung |
 | --- | --- | --- |
-| **1\. Analyse** | Daten sammeln | Liest für jeden User "Weiterschauen" aus. Berechnet bei Serien zusätzlich die nächsten X Episoden und erstellt eine Liste aller benötigten Dateien (On-Deck). |
-| **2\. Schutz** | Session Check | Fragt alle Server ab: Welche Datei wird **jetzt gerade** abgespielt? Diese Pfade landen auf einer internen Blacklist für Verschiebungen. |
-| **3\. Cleanup** | Cache -> Array | Dateien, die NICHT mehr auf der neuen On-Deck-Liste stehen (und nicht abgespielt werden), werden vom Cache auf das Array verschoben.  <br>_Ziel: Platz schaffen._ |
-| **4\. Move** | Array -> Cache | Die neuen On-Deck-Dateien werden vom Array auf den Cache kopiert (rsync).  <br>_Ziel: Performance._ |
+| **1\.&nbsp;Analyse** | Daten sammeln | Liest für jeden User "Weiterschauen" aus. Berechnet bei Serien zusätzlich die nächsten X Episoden und erstellt eine Liste aller benötigten Dateien (On-Deck). |
+| **2\.&nbsp;Schutz** | Session Check | Fragt alle Server ab: Welche Datei wird **jetzt gerade** abgespielt? Diese Pfade landen auf einer internen Blacklist für Verschiebungen. |
+| **3\.&nbsp;Cleanup** | Cache -> Array | Dateien, die NICHT mehr auf der neuen On-Deck-Liste stehen (und nicht abgespielt werden), werden vom Cache auf das Array verschoben.  <br>_Ziel: Platz schaffen._ |
+| **4\.&nbsp;Move** | Array -> Cache | Die neuen On-Deck-Dateien werden vom Array auf den Cache kopiert (rsync).  <br>_Ziel: Performance._ |
 
 ## <a id="commands"></a>5\. Befehle & Ausführung
 
