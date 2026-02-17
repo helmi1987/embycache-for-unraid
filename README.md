@@ -42,15 +42,15 @@ Inhaltsverzeichnis
 
 🧙‍♂️
 
-embycache\_setup.py Wizard Interaktiver Konfigurator. Liest Server-Daten, erstellt/updatet die JSON und erkennt Bibliotheken.
+embycache_setup.py Wizard Interaktiver Konfigurator. Liest Server-Daten, erstellt/updatet die JSON und erkennt Bibliotheken.
 
 ⚙️
 
-embycache\_run.py Core Das Hauptskript. Berechnet On-Deck, schützt aktive Streams, verschiebt Dateien (rsync/mover).
+embycache_run.py Core Das Hauptskript. Berechnet On-Deck, schützt aktive Streams, verschiebt Dateien (rsync/mover).
 
 📄
 
-embycache\_settings.json Speichert die gesamte Konfiguration (Server, User, Limits, Pfade) in hierarchischer Struktur.
+embycache_settings.json Speichert die gesamte Konfiguration (Server, User, Limits, Pfade) in hierarchischer Struktur.
 
 ## <a id="structure"></a>3\. JSON Struktur & Config
 
@@ -58,18 +58,18 @@ Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispie
 ```
 {
     // Globale Pfade für Unraid
-    "cache\_path": "/mnt/cache",
-    "user\_path": "/mnt/user",
-    "array\_path": "/mnt/user0",
-    "min\_free\_percent": 40,
+    "cache_path": "/mnt/cache",
+    "user_path": "/mnt/user",
+    "array_path": "/mnt/user0",
+    "min_free_percent": 40,
 
     // Liste der Emby-Instanzen
     "instances": \[
         {
             "servername": "HomeServer",
             "url": "http://192.168.1.10:8096",
-            "api\_key": "api\_key\_home\_server\_123",
-            "path\_mappings": {
+            "api_key": "api_key_home_server_123",
+            "path_mappings": {
                 "/media/Filme": "/mnt/user/Filme",
                 "/media/Serien": "/mnt/user/Serien"
             }
@@ -77,8 +77,8 @@ Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispie
         {
             "servername": "Ferienhaus",
             "url": "http://192.168.1.20:8096",
-            "api\_key": "api\_key\_remote\_server\_456",
-            "path\_mappings": {
+            "api_key": "api_key_remote_server_456",
+            "path_mappings": {
                 "/data/Movies": "/mnt/user/Movies",
                 "/data/TV": "/mnt/user/TV"
             }
@@ -86,32 +86,32 @@ Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispie
     \],
 
     // Konfigurierte Benutzer (Key ist die Emby User ID)
-    "valid\_users": {
+    "valid_users": {
         // User 1 auf dem Hauptserver (Mixed Content)
         "a1b2c3d4e5f6...": {
             "username": "Papa",
-            "on\_server": "HomeServer",
+            "on_server": "HomeServer",
             "libraries": {
                 "Action Filme": {
-                    "libraries\_type": "movies",
-                    "max\_use\_count\_on\_deck": 5
+                    "libraries_type": "movies",
+                    "max_use_count_on_deck": 5
                 },
                 "Serien Highlights": {
-                    "libraries\_type": "serien",
-                    "max\_use\_count\_on\_deck": 10,
-                    "number\_episodes": 3
+                    "libraries_type": "serien",
+                    "max_use_count_on_deck": 10,
+                    "number_episodes": 3
                 }
             }
         },
         // User 2 auf dem Remote Server (Nur Serien)
         "9876543210ab...": {
             "username": "Kids",
-            "on\_server": "Ferienhaus",
+            "on_server": "Ferienhaus",
             "libraries": {
                 "Cartoons": {
-                    "libraries\_type": "serien",
-                    "max\_use\_count\_on\_deck": 20,  // Mehr Auswahl für Kinder
-                    "number\_episodes": 5   // Binge-Faktor hoch
+                    "libraries_type": "serien",
+                    "max_use_count_on_deck": 20,  // Mehr Auswahl für Kinder
+                    "number_episodes": 5   // Binge-Faktor hoch
                 }
             }
         }
@@ -136,19 +136,19 @@ Das Skript arbeitet strikt sequenziell, um Datenverlust oder volle Caches zu ver
 
 Zeigt an, was das Skript tun würde und welche Medien als "On Deck" erkannt werden. Ideal zur Fehlersuche.
 
-python3 embycache\_run.py --show-on-deck
+python3 embycache_run.py --show-on-deck
 
 ### Modus: Dry-Run (Simulation)
 
 Standardmodus beim Aufruf ohne Argumente. Berechnet alle Verschiebungen und zeigt Statistiken, führt aber keine Dateioperationen aus.
 
-python3 embycache\_run.py
+python3 embycache_run.py
 
 ### Modus: Real (Scharf)
 
 Führt die Aktionen wirklich durch (rsync & mover) und aktualisiert die `embycache_exclude.txt`.
 
-python3 embycache\_run.py --run
+python3 embycache_run.py --run
 
 ## <a id="faq"></a>6\. FAQ & Troubleshooting
 
