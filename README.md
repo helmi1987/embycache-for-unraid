@@ -1,115 +1,180 @@
-# EmbyCache - Intelligentes Medien-Caching für Unraid
+# 🎬 EmbyCache v6.0 Multi-Server
 
-**EmbyCache** ist eine Skript-Sammlung für Unraid, die Medien basierend auf dem Nutzerverhalten von Emby (oder Jellyfin) proaktiv vom Array auf den schnellen Cache (SSD/NVMe) verschiebt. Es sorgt dafür, dass angefangene Filme und die nächsten Episoden einer Serie sofort ohne "Spin-up"-Verzögerung abspielbar sind.
+Intelligentes Caching-System für Unraid: Verschiebt Medien basierend auf Nutzerverhalten von Emby auf die SSD.
 
-- - -
+🌐Multi-Server Unterstützt mehrere Emby-Instanzen gleichzeitig. Benutzer und Pfade werden pro Server getrennt verwaltet.
 
-## 🚀 Features (Version 4.8)
+🧹Smart Cleanup **Zuerst aufräumen:** Alte Dateien werden erst zurück aufs Array verschoben, um Platz für neue On-Deck Inhalte zu schaffen.
 
-*   **Intelligentes Caching:** Analysiert "Weiterschauen" (Resume) und lädt Inhalte auf den Cache.
-*   **Binge-Ready Logik:** Erkennt Serien und lädt automatisch die nächsten _X_ Episoden vor – unterstützt auch tiefe Ordnerstrukturen (z.B. Staffel-Unterordner).
-*   **Deep Scan Support:** Robuste Erkennung von Episoden, unabhängig davon, ob die Serie eine flache Struktur hat oder in Staffel-Ordnern organisiert ist (löst Probleme mit Metadaten-Sortierung).
-*   **Native Mover Integration:** Nutzt beim Zurückschieben auf das Array die offizielle Unraid Mover Binary (`/usr/libexec/unraid/move` oder `/usr/local/bin/move`), um maximale Kompatibilität mit User Shares und FUSE zu gewährleisten.
-*   **Smart Cleanup & Protection:**
-    *   Löscht leere Ordner auf dem Cache automatisch, nachdem Dateien verschoben wurden.
-    *   **Root Protection:** Schützt Hauptordner (z.B. `Filme`, `Serien`) davor, gelöscht zu werden, selbst wenn sie kurzzeitig leer sind.
-*   **Session-Schutz:** Verschiebt keine Dateien, die gerade aktiv abgespielt werden.
-*   **Favoriten-Support:** Kann optional auch Favoriten-Serien vorladen.
-*   **Mover-Kompatibilität:** Erstellt eine Exclude-Liste, um Konflikte mit dem Standard-Mover zu vermeiden.
+🍿Binge-Ready Erkennt Serien automatisch. Lädt nicht nur die aktuelle, sondern auch die nächsten X Episoden vor.
 
-- - -
+🛑Active Protection Prüft live via API, ob eine Datei abgespielt wird. Verhindert Verschieben/Löschen während der Wiedergabe.
 
-## 📋 Voraussetzungen
+👤Granulare Kontrolle Limits (Anzahl Filme/Episoden) können pro Benutzer und pro Bibliothek individuell eingestellt werden.
 
-*   **Unraid OS** (6.x oder 7.x).
-*   **Python 3** (Vorinstalliert oder via NerdTools/Plugin).
-*   **Python Library "requests":** Wird für die API-Kommunikation benötigt.
+🗺️Path Mapping Übersetzt Docker-Pfade (`/media/...`) zuverlässig in Unraid Host-Pfade (`/mnt/user/...`).
 
-### Installation der Abhängigkeiten
+👀On-Deck Report Der Schalter `--show-on-deck` zeigt exakt an, was geplant ist, ohne eine einzige Datei zu bewegen.
 
-Führe folgenden Befehl im Unraid-Terminal aus:
+📂Auto-Detection Erkennt automatisch Bibliotheks-Typen (Filme vs. Serien) und schlägt passende Einstellungen vor.
 
-```
-pip install requests
-```
+Inhaltsverzeichnis
 
-- - -
+*   [1\. Installation & Setup](#installation)
+*   [2\. Die Script-Dateien](#files)
+*   [3\. JSON Struktur & Config](#structure)
+*   [4\. Logik & Ablauf](#workflow)
+*   [5\. Befehle & Ausführung](#commands)
+*   [6\. FAQ & Troubleshooting](#faq)
 
-## 🛠️ Installation & Einrichtung
+## <a id="installation"></a>1\. Installation & Setup
 
-### 1\. Dateien kopieren
+*   Schritt 1: Vorbereitung Stelle sicher, dass Python 3 und die Library `requests` auf deinem Unraid Server installiert sind.  
+    `pip install requests`
+*   Schritt 2: Dateien kopieren Erstelle einen Ordner (z.B. `/mnt/user/system/scripts/embycache`) und kopiere `embycache_setup.py` und `embycache_run.py` hinein.
+*   Schritt 3: Setup Wizard starten Führe den Konfigurator aus:  
+    `python3 embycache_setup.py`  
+    Folge den Anweisungen, um Server, API-Keys und Pfade zu definieren.
+*   Schritt 4: Testlauf Prüfe die Konfiguration mit dem Report-Modus:  
+    `python3 embycache_run.py --show-on-deck`
 
-Erstelle einen Ordner auf deinem System (z.B. `/mnt/user/system/scripts/embycache`) und lege die folgenden Skripte dort ab:
+## <a id="files"></a>2\. Die Script-Dateien
 
-*   `embycache_setup.py` (Konfigurations-Assistent)
-*   `embycache_run.py` (Hauptprogramm)
-*   `embycache_cleaner.py` (Optional: Zum Aufräumen von verwaisten Dateien)
+🧙‍♂️
 
-### 2\. Konfiguration (Setup)
+embycache\_setup.py Wizard Interaktiver Konfigurator. Liest Server-Daten, erstellt/updatet die JSON und erkennt Bibliotheken.
 
-Starte den interaktiven Einrichtungs-Assistenten. Er führt dich durch alle notwendigen Einstellungen und erstellt die `embycache_settings.json`.
+⚙️
 
-```
-python3 embycache_setup.py
-```
+embycache\_run.py Core Das Hauptskript. Berechnet On-Deck, schützt aktive Streams, verschiebt Dateien (rsync/mover).
 
-**Was abgefragt wird:**
+📄
 
-*   **Emby Server:** URL (z.B. `http://192.168.1.10:8096`) und API Key.
-*   **Pfade:** Zuordnung von Docker-Pfaden zu Unraid-Pfaden (z.B. `/data/Serien` -> `/mnt/user/Serien`).
-*   **Benutzer:** Auswahl der Benutzer, deren "Weiterschauen"-Liste überwacht werden soll.
-*   **Cache & Array:** Pfade zu deinem Cache-Pool (z.B. `/mnt/cache`) und dem Array (meist `/mnt/user0`).
-*   **Limits:** Wie viele Episoden sollen im Voraus geladen werden?
+embycache\_settings.json Speichert die gesamte Konfiguration (Server, User, Limits, Pfade) in hierarchischer Struktur.
 
-- - -
+## <a id="structure"></a>3\. JSON Struktur & Config
 
-## ▶️ Verwendung
+Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispiel mit 2 Servern, 2 Usern und unterschiedlichen Bibliothekstypen.
 
-### Hauptskript (EmbyCache)
+{
+    // Globale Pfade für Unraid
+    "cache\_path": "/mnt/cache",
+    "user\_path": "/mnt/user",
+    "array\_path": "/mnt/user0",
+    "min\_free\_percent": 40,
 
-**Manueller Test (Dry-Run)**  
-Standardmäßig läuft das Skript im Simulations-Modus. Es zeigt im Log an, was es tun würde, verschiebt aber keine Dateien.
+    // Liste der Emby-Instanzen
+    "instances": \[
+        {
+            "servername": "HomeServer",
+            "url": "http://192.168.1.10:8096",
+            "api\_key": "api\_key\_home\_server\_123",
+            "path\_mappings": {
+                "/media/Filme": "/mnt/user/Filme",
+                "/media/Serien": "/mnt/user/Serien"
+            }
+        },
+        {
+            "servername": "Ferienhaus",
+            "url": "http://192.168.1.20:8096",
+            "api\_key": "api\_key\_remote\_server\_456",
+            "path\_mappings": {
+                "/data/Movies": "/mnt/user/Movies",
+                "/data/TV": "/mnt/user/TV"
+            }
+        }
+    \],
 
-```
-python3 embycache_run.py
-```
+    // Konfigurierte Benutzer (Key ist die Emby User ID)
+    "valid\_users": {
+        // User 1 auf dem Hauptserver (Mixed Content)
+        "a1b2c3d4e5f6...": {
+            "username": "Papa",
+            "on\_server": "HomeServer",
+            "libraries": {
+                "Action Filme": {
+                    "libraries\_type": "movies",
+                    "max\_use\_count\_on\_deck": 5
+                },
+                "Serien Highlights": {
+                    "libraries\_type": "serien",
+                    "max\_use\_count\_on\_deck": 10,
+                    "number\_episodes": 3
+                }
+            }
+        },
+        // User 2 auf dem Remote Server (Nur Serien)
+        "9876543210ab...": {
+            "username": "Kids",
+            "on\_server": "Ferienhaus",
+            "libraries": {
+                "Cartoons": {
+                    "libraries\_type": "serien",
+                    "max\_use\_count\_on\_deck": 20,  // Mehr Auswahl für Kinder
+                    "number\_episodes": 5   // Binge-Faktor hoch
+                }
+            }
+        }
+    }
+}
 
-**Live-Modus (Dateien verschieben)**  
-Um die Dateien wirklich zu bewegen (Array -> Cache via Rsync, Cache -> Array via Mover), muss das Argument `--run` angehängt werden.
+## <a id="workflow"></a>4\. Logik & Ablauf
 
-```
-python3 embycache_run.py --run
-```
+Das Skript arbeitet strikt sequenziell, um Datenverlust oder volle Caches zu vermeiden.
 
-### Cleaner Skript (Optional)
+| Phase | Aktion | Beschreibung |
+| --- | --- | --- |
+| **1\. Analyse** | Daten sammeln | Liest für jeden User "Weiterschauen" aus. Berechnet bei Serien zusätzlich die nächsten X Episoden und erstellt eine Liste aller benötigten Dateien (On-Deck). |
+| **2\. Schutz** | Session Check | Fragt alle Server ab: Welche Datei wird **jetzt gerade** abgespielt? Diese Pfade landen auf einer internen Blacklist für Verschiebungen. |
+| **3\. Cleanup** | Cache -> Array | Dateien, die NICHT mehr auf der neuen On-Deck-Liste stehen (und nicht abgespielt werden), werden vom Cache auf das Array verschoben.  <br>_Ziel: Platz schaffen._ |
+| **4\. Move** | Array -> Cache | Die neuen On-Deck-Dateien werden vom Array auf den Cache kopiert (rsync).  <br>_Ziel: Performance._ |
 
-Dieses Skript hilft, Dateien auf dem Cache zu finden, die nicht in der Exclude-Liste stehen ("Waisen").
+## <a id="commands"></a>5\. Befehle & Ausführung
 
-*   `python3 embycache_cleaner.py` : Zeigt unbekannte Dateien an (Dry-Run).
-*   `python3 embycache_cleaner.py --run` : Verschiebt gefundene Dateien sofort aufs Array.
-*   `python3 embycache_cleaner.py --add-to-list` : Fügt gefundene Dateien zur Exclude-Liste hinzu (adoptieren).
+### Modus: Report (Nur schauen)
 
-- - -
+Zeigt an, was das Skript tun würde und welche Medien als "On Deck" erkannt werden. Ideal zur Fehlersuche.
 
-## 🤖 Automatisierung (User Scripts Plugin)
+python3 embycache\_run.py --show-on-deck
 
-Es wird empfohlen, das Skript über das **"User Scripts"** Plugin in Unraid laufen zu lassen.
+### Modus: Dry-Run (Simulation)
 
-1.  Erstelle ein neues Script.
-2.  Füge den Befehl ein:  
-    `python3 /mnt/user/system/scripts/embycache/embycache_run.py --run`
-3.  Setze den Zeitplan (z.B. "Hourly" oder alle X Stunden).
+Standardmodus beim Aufruf ohne Argumente. Berechnet alle Verschiebungen und zeigt Statistiken, führt aber keine Dateioperationen aus.
 
-- - -
+python3 embycache\_run.py
 
-## 📂 Dateistruktur & Erklärung
+### Modus: Real (Scharf)
 
-Nach der ersten Ausführung wirst du folgende Dateien im Ordner finden:
+Führt die Aktionen wirklich durch (rsync & mover) und aktualisiert die `embycache_exclude.txt`.
 
-*   **embycache\_run.py:** Das Hauptskript (Logik für Resume/Next-Up).
-*   **embycache\_setup.py:** Der Assistent zum Erstellen der Config.
-*   **embycache\_cleaner.py:** Tool zum Bereinigen von Dateileichen auf dem Cache.
-*   **embycache\_settings.json:** Deine Konfiguration (URL, API-Keys, Pfade).
-*   **embycache\_exclude.txt:** Eine Liste aller Dateien, die sich aktuell auf dem Cache befinden (für Mover-Tuning).
-*   **embycache\_origin.json:** Interne Datenbank für Ursprungs-Pfade (wird aktuell nur informativ gepflegt).
-*   **logs/embycache.log:** Das Logfile für Fehlerdiagnose und Aktivitätsnachweis.
+python3 embycache\_run.py --run
+
+## <a id="faq"></a>6\. FAQ & Troubleshooting
+
+⚠️ Wichtiger Hinweis zum Mover
+
+Das Skript nutzt den Unraid Mover für den Cleanup (Cache -> Array). Damit das funktioniert, muss die Datei `embycache_exclude.txt` korrekt geschrieben werden. Tools wie das "Mover Tuning Plugin" können diese Liste nutzen, um geschützte Dateien auf dem Cache zu ignorieren.
+
+### Warum werden meine Filme nicht verschoben?
+
+Prüfe das **Path Mapping** in der `embycache_settings.json`. Wenn der Docker-Pfad (Emby) nicht in einen gültigen Unraid-Pfad übersetzt werden kann, ignoriert das Skript die Datei sicherheitshalber.
+
+### Wird mein laufender Film unterbrochen?
+
+**Nein.** Die Active-Protection-Logik erkennt laufende Streams und überspringt diese Dateien bei jeglichen Verschiebe-Aktionen.
+
+### Wo finde ich Logs?
+
+Ausführliche Logs (mit kompletten Pfaden) liegen in `logs/embycache.log`. Die Konsolenausgabe ist bewusst minimal gehalten.
+
+## 7\. Dateistruktur
+
+Die folgenden Dateien befinden sich im Skript-Verzeichnis:
+
+*   `embycache_setup.py`: Der Konfigurations-Wizard.
+*   `embycache_run.py`: Das Hauptskript.
+*   `embycache_settings.json`: Speichert Server, User und Limits.
+*   `embycache_exclude.txt`: Liste der Dateien, die aktuell auf dem Cache liegen (wird vom Mover-Tuning Plugin genutzt, um diese Dateien NICHT zu verschieben).
+*   `logs/`: Ordner für Rotierende Logs (Max 20 Dateien à 10MB).
+
+EmbyCache | Version 6.0 Multi-Instance

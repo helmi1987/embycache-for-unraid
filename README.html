@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EmbyCache Handbuch v6.0</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --card-bg: #1e1e1e;
+            --text-color: #e0e0e0;
+            --text-muted: #b0b0b0;
+            --accent-color: #4caf50; /* Emby Green */
+            --secondary-color: #03a9f4; /* Blue */
+            --success-color: #00e676;
+            --warning-color: #ffa726;
+            --danger-color: #ef5350;
+            --code-bg: #263238;
+            --border-radius: 12px;
+            --border-color: #333;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            margin: 0;
+            padding: 40px;
+            max-width: 1280px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        /* --- TYPOGRAPHY --- */
+        h1 { 
+            font-size: 3em; 
+            border-bottom: 4px solid var(--accent-color); 
+            padding-bottom: 20px; 
+            margin-top: 0;
+            color: #fff;
+            letter-spacing: -1px;
+        }
+        h2 { 
+            font-size: 1.8em;
+            margin-top: 50px;
+            border-left: 6px solid var(--accent-color); 
+            padding-left: 20px; 
+            background: linear-gradient(90deg, rgba(76, 175, 80, 0.1) 0%, transparent 100%);
+            padding-top: 10px;
+            padding-bottom: 10px;
+            border-radius: 0 var(--border-radius) var(--border-radius) 0;
+            color: #fff;
+        }
+        h3 { color: var(--secondary-color); margin-top: 30px; margin-bottom: 15px; border-bottom: 1px solid #333; display: inline-block; padding-bottom: 5px;}
+        p { color: var(--text-muted); margin-bottom: 1.2em; font-size: 1.05em; }
+        strong { color: #fff; font-weight: 600; }
+
+        /* --- FEATURES GRID --- */
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 50px;
+        }
+        .feature-card {
+            background-color: var(--card-bg);
+            padding: 25px;
+            border-radius: var(--border-radius);
+            border: 1px solid var(--border-color);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .feature-card:hover { transform: translateY(-5px); border-color: var(--secondary-color); box-shadow: 0 10px 20px rgba(0,0,0,0.3); }
+        .feature-title { font-weight: bold; color: #fff; margin-bottom: 10px; display: block; font-size: 1.2em; display: flex; align-items: center; }
+        .feature-icon { font-size: 1.5em; margin-right: 15px; }
+
+        /* --- TOC --- */
+        .toc-container {
+            background-color: var(--card-bg);
+            padding: 25px;
+            border-radius: var(--border-radius);
+            border-left: 5px solid var(--secondary-color);
+            margin-bottom: 50px;
+        }
+        .toc-title { font-weight: bold; font-size: 1.2em; color: #fff; margin-bottom: 15px; display: block; }
+        .toc-list { list-style: none; padding: 0; column-count: 2; }
+        .toc-list li { margin-bottom: 10px; }
+        .toc-list a { color: var(--text-muted); text-decoration: none; transition: color 0.2s; font-size: 1.1em; }
+        .toc-list a:hover { color: var(--accent-color); text-decoration: none; padding-left: 5px; }
+
+        /* --- FILE BOXES --- */
+        .file-box {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            padding: 25px;
+            border-radius: var(--border-radius);
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .file-info { flex-grow: 1; margin-left: 20px; }
+        .file-name { font-family: 'Consolas', monospace; font-size: 1.4em; color: var(--accent-color); font-weight: bold; display: block;}
+        .file-desc { color: var(--text-muted); margin-top: 5px; display: block; }
+        .file-icon { font-size: 2em; color: #555; }
+
+        /* --- INSTALLATION STEPS --- */
+        .step-list { list-style: none; padding: 0; counter-reset: step-counter; }
+        .step-list li { 
+            margin-bottom: 20px; 
+            background: var(--card-bg); 
+            padding: 20px 20px 20px 60px;
+            border-radius: var(--border-radius); 
+            position: relative;
+            border: 1px solid var(--border-color);
+        }
+        .step-list li::before {
+            counter-increment: step-counter;
+            content: counter(step-counter);
+            position: absolute;
+            left: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            background-color: var(--accent-color);
+            color: #fff;
+            width: 30px;
+            height: 30px;
+            text-align: center;
+            line-height: 30px;
+            border-radius: 50%;
+            font-weight: bold;
+        }
+        .step-title { font-weight: bold; color: #fff; display: block; margin-bottom: 8px; font-size: 1.2em; border-bottom: 1px solid #333; padding-bottom: 5px; }
+
+        /* --- CONFIGURATION TABLES & CODE --- */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td { border: 1px solid var(--border-color); padding: 10px; text-align: left; }
+        /* Hier wird der Umbruch in der ersten Spalte verhindert */
+        th:first-child, td:first-child { white-space: nowrap; }
+        
+        th { background-color: #2c2c2c; color: var(--accent-color); text-transform: uppercase; font-size: 0.9em; letter-spacing: 1px; font-weight: 700; }
+        tr:hover { background-color: #252525; }
+
+        pre {
+            background-color: var(--code-bg);
+            padding: 25px;
+            border-radius: var(--border-radius);
+            overflow-x: auto;
+            border: 1px solid var(--border-color);
+            color: #eceff1;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.95em;
+            line-height: 1.5;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.3);
+        }
+        .code-comment { color: #78909c; font-style: italic; }
+        .code-key { color: #80cbc4; }
+        .code-string { color: #c3e88d; }
+        .code-number { color: #f78c6c; }
+
+        /* --- BADGES --- */
+        .badge { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; margin-left: 10px;}
+        .badge-ver { background-color: var(--success-color); color: #121212; vertical-align: middle; }
+        .badge-wiz { background-color: #ab47bc; color: white; }
+        .badge-run { background-color: #29b6f6; color: white; }
+
+        /* --- COLLAPSIBLE --- */
+        details.main-section {
+            background-color: var(--card-bg);
+            margin-bottom: 20px;
+            border-radius: var(--border-radius);
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+        }
+        details.main-section > summary {
+            padding: 20px;
+            cursor: pointer;
+            background-color: #252525;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-weight: bold;
+            color: #fff;
+            font-size: 1.1em;
+        }
+        details.main-section > summary:hover { background-color: #2f2f2f; }
+        details.main-section > summary::after { content: '+'; font-size: 1.5em; color: var(--accent-color); }
+        details.main-section[open] > summary::after { content: '-'; }
+        details.main-section > summary::-webkit-details-marker { display: none; }
+        .section-content { padding: 25px; }
+
+        /* --- EMERGENCY BOX --- */
+        .emergency-box {
+            border: 2px solid var(--danger-color);
+            background: linear-gradient(135deg, rgba(239, 83, 80, 0.15) 0%, rgba(30, 30, 30, 1) 100%);
+            padding: 30px;
+            border-radius: var(--border-radius);
+            margin-top: 40px;
+        }
+        .emergency-header { color: var(--danger-color); font-weight: bold; font-size: 1.5em; display: flex; align-items: center; margin-bottom: 15px;}
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>🎬 EmbyCache <span class="badge badge-ver">v6.0 Multi-Server</span></h1>
+        <p>Intelligentes Caching-System für Unraid: Verschiebt Medien basierend auf Nutzerverhalten von Emby auf die SSD.</p>
+    </header>
+
+    <div class="feature-grid">
+        <div class="feature-card">
+            <span class="feature-title"><span class="feature-icon">🌐</span>Multi-Server</span>
+            Unterstützt mehrere Emby-Instanzen gleichzeitig. Benutzer und Pfade werden pro Server getrennt verwaltet.
+        </div>
+        <div class="feature-card">
+            <span class="feature-title"><span class="feature-icon">🧹</span>Smart Cleanup</span>
+            <strong>Zuerst aufräumen:</strong> Alte Dateien werden erst zurück aufs Array verschoben, um Platz für neue On-Deck Inhalte zu schaffen.
+        </div>
+        <div class="feature-card">
+            <span class="feature-title"><span class="feature-icon">🍿</span>Binge-Ready</span>
+            Erkennt Serien automatisch. Lädt nicht nur die aktuelle, sondern auch die nächsten X Episoden vor.
+        </div>
+        <div class="feature-card">
+            <span class="feature-title"><span class="feature-icon">🛑</span>Active Protection</span>
+            Prüft live via API, ob eine Datei abgespielt wird. Verhindert Verschieben/Löschen während der Wiedergabe.
+        </div>
+        <div class="feature-card">
+            <span class="feature-title"><span class="feature-icon">👤</span>Granulare Kontrolle</span>
+            Limits (Anzahl Filme/Episoden) können pro Benutzer und pro Bibliothek individuell eingestellt werden.
+        </div>
+        <div class="feature-card">
+            <span class="feature-title"><span class="feature-icon">🗺️</span>Path Mapping</span>
+            Übersetzt Docker-Pfade (<code>/media/...</code>) zuverlässig in Unraid Host-Pfade (<code>/mnt/user/...</code>).
+        </div>
+        <div class="feature-card">
+            <span class="feature-title"><span class="feature-icon">👀</span>On-Deck Report</span>
+            Der Schalter <code>--show-on-deck</code> zeigt exakt an, was geplant ist, ohne eine einzige Datei zu bewegen.
+        </div>
+        <div class="feature-card">
+            <span class="feature-title"><span class="feature-icon">📂</span>Auto-Detection</span>
+            Erkennt automatisch Bibliotheks-Typen (Filme vs. Serien) und schlägt passende Einstellungen vor.
+        </div>
+    </div>
+
+    <div class="toc-container">
+        <span class="toc-title">Inhaltsverzeichnis</span>
+        <ul class="toc-list">
+            <li><a href="#installation">1. Installation & Setup</a></li>
+            <li><a href="#files">2. Die Script-Dateien</a></li>
+            <li><a href="#structure">3. JSON Struktur & Config</a></li>
+            <li><a href="#workflow">4. Logik & Ablauf</a></li>
+            <li><a href="#commands">5. Befehle & Ausführung</a></li>
+            <li><a href="#faq">6. FAQ & Troubleshooting</a></li>
+        </ul>
+    </div>
+
+    <details class="main-section" id="installation">
+        <summary><h2>1. Installation & Setup</h2></summary>
+        <div class="section-content">
+            <ul class="step-list">
+                <li>
+                    <span class="step-title">Schritt 1: Vorbereitung</span>
+                    Stelle sicher, dass Python 3 und die Library <code>requests</code> auf deinem Unraid Server installiert sind.<br>
+                    <code>pip install requests</code>
+                </li>
+                <li>
+                    <span class="step-title">Schritt 2: Dateien kopieren</span>
+                    Erstelle einen Ordner (z.B. <code>/mnt/user/system/scripts/embycache</code>) und kopiere <code>embycache_setup.py</code> und <code>embycache_run.py</code> hinein.
+                </li>
+                <li>
+                    <span class="step-title">Schritt 3: Setup Wizard starten</span>
+                    Führe den Konfigurator aus:<br>
+                    <code>python3 embycache_setup.py</code><br>
+                    Folge den Anweisungen, um Server, API-Keys und Pfade zu definieren.
+                </li>
+                <li>
+                    <span class="step-title">Schritt 4: Testlauf</span>
+                    Prüfe die Konfiguration mit dem Report-Modus:<br>
+                    <code>python3 embycache_run.py --show-on-deck</code>
+                </li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="main-section" id="files">
+        <summary><h2>2. Die Script-Dateien</h2></summary>
+        <div class="section-content">
+            <div class="file-box">
+                <span class="file-icon">🧙‍♂️</span>
+                <div class="file-info">
+                    <span class="file-name">embycache_setup.py <span class="badge badge-wiz">Wizard</span></span>
+                    <span class="file-desc">Interaktiver Konfigurator. Liest Server-Daten, erstellt/updatet die JSON und erkennt Bibliotheken.</span>
+                </div>
+            </div>
+
+            <div class="file-box">
+                <span class="file-icon">⚙️</span>
+                <div class="file-info">
+                    <span class="file-name">embycache_run.py <span class="badge badge-run">Core</span></span>
+                    <span class="file-desc">Das Hauptskript. Berechnet On-Deck, schützt aktive Streams, verschiebt Dateien (rsync/mover).</span>
+                </div>
+            </div>
+
+            <div class="file-box">
+                <span class="file-icon">📄</span>
+                <div class="file-info">
+                    <span class="file-name">embycache_settings.json</span>
+                    <span class="file-desc">Speichert die gesamte Konfiguration (Server, User, Limits, Pfade) in hierarchischer Struktur.</span>
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <details class="main-section" id="structure">
+        <summary><h2>3. JSON Struktur & Config</h2></summary>
+        <div class="section-content">
+            <p>Die <code>embycache_settings.json</code> ist das Herzstück. Hier ein detailliertes Beispiel mit 2 Servern, 2 Usern und unterschiedlichen Bibliothekstypen.</p>
+
+<pre>
+{
+    <span class="code-comment">// Globale Pfade für Unraid</span>
+    <span class="code-key">"cache_path"</span>: <span class="code-string">"/mnt/cache"</span>,
+    <span class="code-key">"user_path"</span>: <span class="code-string">"/mnt/user"</span>,
+    <span class="code-key">"array_path"</span>: <span class="code-string">"/mnt/user0"</span>,
+    <span class="code-key">"min_free_percent"</span>: <span class="code-number">40</span>,
+
+    <span class="code-comment">// Liste der Emby-Instanzen</span>
+    <span class="code-key">"instances"</span>: [
+        {
+            <span class="code-key">"servername"</span>: <span class="code-string">"HomeServer"</span>,
+            <span class="code-key">"url"</span>: <span class="code-string">"http://192.168.1.10:8096"</span>,
+            <span class="code-key">"api_key"</span>: <span class="code-string">"api_key_home_server_123"</span>,
+            <span class="code-key">"path_mappings"</span>: {
+                <span class="code-string">"/media/Filme"</span>: <span class="code-string">"/mnt/user/Filme"</span>,
+                <span class="code-string">"/media/Serien"</span>: <span class="code-string">"/mnt/user/Serien"</span>
+            }
+        },
+        {
+            <span class="code-key">"servername"</span>: <span class="code-string">"Ferienhaus"</span>,
+            <span class="code-key">"url"</span>: <span class="code-string">"http://192.168.1.20:8096"</span>,
+            <span class="code-key">"api_key"</span>: <span class="code-string">"api_key_remote_server_456"</span>,
+            <span class="code-key">"path_mappings"</span>: {
+                <span class="code-string">"/data/Movies"</span>: <span class="code-string">"/mnt/user/Movies"</span>,
+                <span class="code-string">"/data/TV"</span>: <span class="code-string">"/mnt/user/TV"</span>
+            }
+        }
+    ],
+
+    <span class="code-comment">// Konfigurierte Benutzer (Key ist die Emby User ID)</span>
+    <span class="code-key">"valid_users"</span>: {
+        <span class="code-comment">// User 1 auf dem Hauptserver (Mixed Content)</span>
+        <span class="code-key">"a1b2c3d4e5f6..."</span>: {
+            <span class="code-key">"username"</span>: <span class="code-string">"Papa"</span>,
+            <span class="code-key">"on_server"</span>: <span class="code-string">"HomeServer"</span>,
+            <span class="code-key">"libraries"</span>: {
+                <span class="code-key">"Action Filme"</span>: {
+                    <span class="code-key">"libraries_type"</span>: <span class="code-string">"movies"</span>,
+                    <span class="code-key">"max_use_count_on_deck"</span>: <span class="code-number">5</span>
+                },
+                <span class="code-key">"Serien Highlights"</span>: {
+                    <span class="code-key">"libraries_type"</span>: <span class="code-string">"serien"</span>,
+                    <span class="code-key">"max_use_count_on_deck"</span>: <span class="code-number">10</span>,
+                    <span class="code-key">"number_episodes"</span>: <span class="code-number">3</span>
+                }
+            }
+        },
+        <span class="code-comment">// User 2 auf dem Remote Server (Nur Serien)</span>
+        <span class="code-key">"9876543210ab..."</span>: {
+            <span class="code-key">"username"</span>: <span class="code-string">"Kids"</span>,
+            <span class="code-key">"on_server"</span>: <span class="code-string">"Ferienhaus"</span>,
+            <span class="code-key">"libraries"</span>: {
+                <span class="code-key">"Cartoons"</span>: {
+                    <span class="code-key">"libraries_type"</span>: <span class="code-string">"serien"</span>,
+                    <span class="code-key">"max_use_count_on_deck"</span>: <span class="code-number">20</span>,  <span class="code-comment">// Mehr Auswahl für Kinder</span>
+                    <span class="code-key">"number_episodes"</span>: <span class="code-number">5</span>   <span class="code-comment">// Binge-Faktor hoch</span>
+                }
+            }
+        }
+    }
+}
+</pre>
+        </div>
+    </details>
+
+    <details class="main-section" id="workflow">
+        <summary><h2>4. Logik & Ablauf</h2></summary>
+        <div class="section-content">
+            <p>Das Skript arbeitet strikt sequenziell, um Datenverlust oder volle Caches zu vermeiden.</p>
+            
+            <table>
+                <tr>
+                    <th>Phase</th>
+                    <th>Aktion</th>
+                    <th>Beschreibung</th>
+                </tr>
+                <tr>
+                    <td><strong>1. Analyse</strong></td>
+                    <td>Daten sammeln</td>
+                    <td>Liest für jeden User "Weiterschauen" aus. Berechnet bei Serien zusätzlich die nächsten X Episoden und erstellt eine Liste aller benötigten Dateien (On-Deck).</td>
+                </tr>
+                <tr>
+                    <td><strong>2. Schutz</strong></td>
+                    <td>Session Check</td>
+                    <td>Fragt alle Server ab: Welche Datei wird <strong>jetzt gerade</strong> abgespielt? Diese Pfade landen auf einer internen Blacklist für Verschiebungen.</td>
+                </tr>
+                <tr>
+                    <td><strong>3. Cleanup</strong></td>
+                    <td>Cache -> Array</td>
+                    <td>Dateien, die NICHT mehr auf der neuen On-Deck-Liste stehen (und nicht abgespielt werden), werden vom Cache auf das Array verschoben. <br><em>Ziel: Platz schaffen.</em></td>
+                </tr>
+                <tr>
+                    <td><strong>4. Move</strong></td>
+                    <td>Array -> Cache</td>
+                    <td>Die neuen On-Deck-Dateien werden vom Array auf den Cache kopiert (rsync). <br><em>Ziel: Performance.</em></td>
+                </tr>
+            </table>
+        </div>
+    </details>
+
+    <details class="main-section" id="commands">
+        <summary><h2>5. Befehle & Ausführung</h2></summary>
+        <div class="section-content">
+            
+            <h3>Modus: Report (Nur schauen)</h3>
+            <p>Zeigt an, was das Skript tun würde und welche Medien als "On Deck" erkannt werden. Ideal zur Fehlersuche.</p>
+            <pre>python3 embycache_run.py --show-on-deck</pre>
+
+            <h3>Modus: Dry-Run (Simulation)</h3>
+            <p>Standardmodus beim Aufruf ohne Argumente. Berechnet alle Verschiebungen und zeigt Statistiken, führt aber keine Dateioperationen aus.</p>
+            <pre>python3 embycache_run.py</pre>
+
+            <h3>Modus: Real (Scharf)</h3>
+            <p>Führt die Aktionen wirklich durch (rsync & mover) und aktualisiert die <code>embycache_exclude.txt</code>.</p>
+            <pre>python3 embycache_run.py --run</pre>
+
+        </div>
+    </details>
+
+    <details class="main-section" id="faq">
+        <summary><h2>6. FAQ & Troubleshooting</h2></summary>
+        <div class="section-content">
+            <div class="emergency-box">
+                <div class="emergency-header">
+                    <span>⚠️ Wichtiger Hinweis zum Mover</span>
+                </div>
+                <p>Das Skript nutzt den Unraid Mover für den Cleanup (Cache -> Array). Damit das funktioniert, muss die Datei <code>embycache_exclude.txt</code> korrekt geschrieben werden. Tools wie das "Mover Tuning Plugin" können diese Liste nutzen, um geschützte Dateien auf dem Cache zu ignorieren.</p>
+            </div>
+
+            <h3>Warum werden meine Filme nicht verschoben?</h3>
+            <p>Prüfe das <strong>Path Mapping</strong> in der <code>embycache_settings.json</code>. Wenn der Docker-Pfad (Emby) nicht in einen gültigen Unraid-Pfad übersetzt werden kann, ignoriert das Skript die Datei sicherheitshalber.</p>
+
+            <h3>Wird mein laufender Film unterbrochen?</h3>
+            <p><strong>Nein.</strong> Die Active-Protection-Logik erkennt laufende Streams und überspringt diese Dateien bei jeglichen Verschiebe-Aktionen.</p>
+
+            <h3>Wo finde ich Logs?</h3>
+            <p>Ausführliche Logs (mit kompletten Pfaden) liegen in <code>logs/embycache.log</code>. Die Konsolenausgabe ist bewusst minimal gehalten.</p>
+        </div>
+    </details>
+
+    <details class="main-section" id="structure">
+        <summary><h2>7. Dateistruktur</h2></summary>
+        <div class="section-content">
+            <p>Die folgenden Dateien befinden sich im Skript-Verzeichnis:</p>
+            <ul>
+                <li><code>embycache_setup.py</code>: Der Konfigurations-Wizard.</li>
+                <li><code>embycache_run.py</code>: Das Hauptskript.</li>
+                <li><code>embycache_settings.json</code>: Speichert Server, User und Limits.</li>
+                <li><code>embycache_exclude.txt</code>: Liste der Dateien, die aktuell auf dem Cache liegen (wird vom Mover-Tuning Plugin genutzt, um diese Dateien NICHT zu verschieben).</li>
+                <li><code>logs/</code>: Ordner für Rotierende Logs (Max 20 Dateien à 10MB).</li>
+            </ul>
+        </div>
+    </details>
+
+    <footer style="margin-top: 60px; text-align: center; color: #666; font-size: 0.8em; border-top: 1px solid #333; padding-top: 20px;">
+        EmbyCache | Version 6.0 Multi-Instance
+    </footer>
+
+</body>
+</html>
