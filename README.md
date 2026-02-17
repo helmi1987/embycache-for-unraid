@@ -64,7 +64,7 @@ Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispie
     "min_free_percent": 40,
 
     // Liste der Emby-Instanzen
-    "instances": \[
+    "instances": [
         {
             "servername": "HomeServer",
             "url": "http://192.168.1.10:8096",
@@ -83,7 +83,7 @@ Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispie
                 "/data/TV": "/mnt/user/TV"
             }
         }
-    \],
+    ],
 
     // Konfigurierte Benutzer (Key ist die Emby User ID)
     "valid_users": {
