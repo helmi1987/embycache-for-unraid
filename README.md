@@ -136,19 +136,19 @@ Das Skript arbeitet strikt sequenziell, um Datenverlust oder volle Caches zu ver
 
 Zeigt an, was das Skript tun würde und welche Medien als "On Deck" erkannt werden. Ideal zur Fehlersuche.
 
-python3 embycache_run.py --show-on-deck
+`python3 embycache_run.py --show-on-deck`
 
 ### Modus: Dry-Run (Simulation)
 
 Standardmodus beim Aufruf ohne Argumente. Berechnet alle Verschiebungen und zeigt Statistiken, führt aber keine Dateioperationen aus.
 
-python3 embycache_run.py
+`python3 embycache_run.py`
 
 ### Modus: Real (Scharf)
 
 Führt die Aktionen wirklich durch (rsync & mover) und aktualisiert die `embycache_exclude.txt`.
 
-python3 embycache_run.py --run
+`python3 embycache_run.py --run`
 
 ## <a id="faq"></a>6\. FAQ & Troubleshooting
 
