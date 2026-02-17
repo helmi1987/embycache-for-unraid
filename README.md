@@ -55,7 +55,7 @@ embycache\_settings.json Speichert die gesamte Konfiguration (Server, User, Limi
 ## <a id="structure"></a>3\. JSON Struktur & Config
 
 Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispiel mit 2 Servern, 2 Usern und unterschiedlichen Bibliothekstypen.
-
+```
 {
     // Globale Pfade für Unraid
     "cache\_path": "/mnt/cache",
@@ -117,6 +117,7 @@ Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispie
         }
     }
 }
+```
 
 ## <a id="workflow"></a>4\. Logik & Ablauf
 
