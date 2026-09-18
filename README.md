@@ -1,181 +1,136 @@
-# 🎬 EmbyCache v6.0 Multi-Server
+# 🎬 EmbyCache für Unraid
 
-Intelligentes Caching-System für Unraid: Verschiebt Medien basierend auf Nutzerverhalten von Emby auf die SSD.
+Verschiebt die Medien, die Emby-Benutzer als Nächstes sehen werden («Weiterschauen», die nächsten Folgen, Favoriten-Serien), vom Array auf den Cache-Pool und räumt sie wieder aufs Array, sobald sie nicht mehr gebraucht werden. Die Array-Platten können dadurch schlafen, und die Wiedergabe startet ohne Spin-up.
 
-🌐Multi-Server Unterstützt mehrere Emby-Instanzen gleichzeitig. Benutzer und Pfade werden pro Server getrennt verwaltet.
+Emby merkt davon nichts, weil es die Medien über `/mnt/user/...` sieht – egal ob eine Datei gerade auf dem Pool oder auf einer Array-Disk liegt.
 
-🧹Smart Cleanup **Zuerst aufräumen:** Alte Dateien werden erst zurück aufs Array verschoben, um Platz für neue On-Deck Inhalte zu schaffen.
-
-🍿Binge-Ready Erkennt Serien automatisch. Lädt nicht nur die aktuelle, sondern auch die nächsten X Episoden vor.
-
-🛑Active Protection Prüft live via API, ob eine Datei abgespielt wird. Verhindert Verschieben/Löschen während der Wiedergabe.
-
-👤Granulare Kontrolle Limits (Anzahl Filme/Episoden) können pro Benutzer und pro Bibliothek individuell eingestellt werden.
-
-🗺️Path Mapping Übersetzt Docker-Pfade (`/media/...`) zuverlässig in Unraid Host-Pfade (`/mnt/user/...`).
-
-👀On-Deck Report Der Schalter `--show-on-deck` zeigt exakt an, was geplant ist, ohne eine einzige Datei zu bewegen.
-
-📂Auto-Detection Erkennt automatisch Bibliotheks-Typen (Filme vs. Serien) und schlägt passende Einstellungen vor.
-
-Inhaltsverzeichnis
-
-*   [1\. Installation & Setup](#installation)
-*   [2\. Die Script-Dateien](#files)
-*   [3\. JSON Struktur & Config](#structure)
-*   [4\. Logik & Ablauf](#workflow)
-*   [5\. Befehle & Ausführung](#commands)
-*   [6\. FAQ & Troubleshooting](#faq)
-
-## <a id="installation"></a>1\. Installation & Setup
-
-*   Schritt 1: Vorbereitung Stelle sicher, dass Python 3 und die Library `requests` auf deinem Unraid Server installiert sind.  
-    `pip install requests`
-*   Schritt 2: Dateien kopieren Erstelle einen Ordner (z.B. `/mnt/user/system/scripts/embycache`) und kopiere `embycache_setup.py` und `embycache_run.py` hinein.
-*   Schritt 3: Setup Wizard starten Führe den Konfigurator aus:  
-    `python3 embycache_setup.py`  
-    Folge den Anweisungen, um Server, API-Keys und Pfade zu definieren.
-*   Schritt 4: Testlauf Prüfe die Konfiguration mit dem Report-Modus:  
-    `python3 embycache_run.py --show-on-deck`
-
-## <a id="files"></a>2\. Die Script-Dateien
-
-🧙‍♂️
-
-embycache_setup.py Wizard Interaktiver Konfigurator. Liest Server-Daten, erstellt/updatet die JSON und erkennt Bibliotheken.
-
-⚙️
-
-embycache_run.py Core Das Hauptskript. Berechnet On-Deck, schützt aktive Streams, verschiebt Dateien (rsync/mover).
-
-📄
-
-embycache_settings.json Speichert die gesamte Konfiguration (Server, User, Limits, Pfade) in hierarchischer Struktur.
-
-## <a id="structure"></a>3\. JSON Struktur & Config
-
-Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispiel mit 2 Servern, 2 Usern und unterschiedlichen Bibliothekstypen.
-```
-{
-    // Globale Pfade für Unraid
-    "cache_path": "/mnt/cache",
-    "user_path": "/mnt/user",
-    "array_path": "/mnt/user0",
-    "min_free_percent": 40,
-
-    // Liste der Emby-Instanzen
-    "instances": [
-        {
-            "servername": "HomeServer",
-            "url": "http://192.168.1.10:8096",
-            "api_key": "api_key_home_server_123",
-            "path_mappings": {
-                "/media/Filme": "/mnt/user/Filme",
-                "/media/Serien": "/mnt/user/Serien"
-            }
-        },
-        {
-            "servername": "Ferienhaus",
-            "url": "http://192.168.1.20:8096",
-            "api_key": "api_key_remote_server_456",
-            "path_mappings": {
-                "/data/Movies": "/mnt/user/Movies",
-                "/data/TV": "/mnt/user/TV"
-            }
-        }
-    ],
-
-    // Konfigurierte Benutzer (Key ist die Emby User ID)
-    "valid_users": {
-        // User 1 auf dem Hauptserver (Mixed Content)
-        "a1b2c3d4e5f6...": {
-            "username": "Papa",
-            "on_server": "HomeServer",
-            "libraries": {
-                "Action Filme": {
-                    "libraries_type": "movies",
-                    "max_use_count_on_deck": 5
-                },
-                "Serien Highlights": {
-                    "libraries_type": "serien",
-                    "max_use_count_on_deck": 10,
-                    "number_episodes": 3
-                }
-            }
-        },
-        // User 2 auf dem Remote Server (Nur Serien)
-        "9876543210ab...": {
-            "username": "Kids",
-            "on_server": "Ferienhaus",
-            "libraries": {
-                "Cartoons": {
-                    "libraries_type": "serien",
-                    "max_use_count_on_deck": 20,  // Mehr Auswahl für Kinder
-                    "number_episodes": 5   // Binge-Faktor hoch
-                }
-            }
-        }
-    }
-}
-```
-
-## <a id="workflow"></a>4\. Logik & Ablauf
-
-Das Skript arbeitet strikt sequenziell, um Datenverlust oder volle Caches zu vermeiden.
+## Was das Script macht
 
 | Phase | Aktion | Beschreibung |
 | --- | --- | --- |
-| **1\.&nbsp;Analyse** | Daten&nbsp;sammeln | Liest für jeden User "Weiterschauen" aus. Berechnet bei Serien zusätzlich die nächsten X Episoden und erstellt eine Liste aller benötigten Dateien (On-Deck). |
-| **2\.&nbsp;Schutz** | Session&nbsp;Check | Fragt alle Server ab: Welche Datei wird **jetzt gerade** abgespielt? Diese Pfade landen auf einer internen Blacklist für Verschiebungen. |
-| **3\.&nbsp;Cleanup** | Cache&nbsp;-> Array | Dateien, die NICHT mehr auf der neuen On-Deck-Liste stehen (und nicht abgespielt werden), werden vom Cache auf das Array verschoben.  <br>_Ziel: Platz schaffen._ |
-| **4\.&nbsp;Move** | Array&nbsp;-> Cache | Die neuen On-Deck-Dateien werden vom Array auf den Cache kopiert (rsync).  <br>_Ziel: Performance._ |
+| 1. Schutz | Sessions | Fragt alle Instanzen, was **gerade läuft**. Diese Dateien werden nie verschoben. |
+| 2. Analyse | On-Deck | Pro Benutzer: «Weiterschauen»-Einträge, bei Serien die nächsten Folgen **in Serienreihenfolge** (nach der aktuellen Folge), plus die nächsten ungesehenen Folgen von Favoriten-Serien. Umfang nach Zähler (`number_episodes`) oder nach **Budget** (`cache_budget`, siehe unten). |
+| 3. Cleanup | Cache → Array | Dateien aus der letzten Exclude-Liste, die nicht mehr on deck sind, gehen über das Unraid-`move`-Binary zurück aufs Array. **Zuerst**, damit Platz frei wird. |
+| 4. Befüllen | Array → Cache | On-Deck-Dateien kommen auf den Pool – per `rsync -aAX --numeric-ids /mnt/user0/… /mnt/<pool>/…` **exakt wie im Original**, Quelle erst gelöscht, wenn rsync mit 0 endet und die Grösse stimmt (`fill_tool: rsync`, Default). Optional liest rsync vom echten `/mnt/diskN`-Pfad (`array_source: disk`) oder die Array-Pfade gehen ans Unraid-`move`-Binary wie beim Stock-Mover für «prefer»-Shares (`fill_tool: mover`). Vorher wird der Freiplatz geprüft. |
+| 5. Exclude-Liste | `embycache_exclude.txt` | Alle On-Deck-Dateien, die jetzt auf dem Cache liegen – für Mover Tuning («File list path»), damit der reguläre Mover sie in Ruhe lässt. |
 
-## <a id="commands"></a>5\. Befehle & Ausführung
+Ist Emby nicht (vollständig) erreichbar, wird der Cleanup übersprungen und die alte Exclude-Liste bleibt geschützt – sonst würde ein kurzer Emby-Neustart den ganzen Cache leeren.
 
-### Modus: Report (Nur schauen)
+## Installation
 
-Zeigt an, was das Skript tun würde und welche Medien als "On Deck" erkannt werden. Ideal zur Fehlersuche.
+1. Python 3 auf Unraid (z.B. Plugin «Python 3 for UNRAID»). Weitere Pakete braucht es **nicht** – die Scripte nutzen nur die Standardbibliothek.
+2. Ordner anlegen, z.B. `/mnt/user/system/scripts/embycache`, und `embycache_lib.py`, `embycache_run.py`, `embycache_setup.py`, `embycache_cleaner.py` hineinkopieren.
+3. Wizard ausführen: `python3 embycache_setup.py`
+4. Prüfen: `python3 embycache_run.py --show-on-deck` (Report) und `python3 embycache_run.py` (Dry-Run)
+5. Scharf schalten, z.B. als User Script stündlich:
+   ```
+   #!/bin/bash
+   cd /mnt/user/system/scripts/embycache && python3 embycache_run.py --run
+   ```
 
-`python3 embycache_run.py --show-on-deck`
+## Dateien
 
-### Modus: Dry-Run (Simulation)
+| Datei | Zweck |
+| --- | --- |
+| `embycache_setup.py` | Interaktiver Konfigurator: Instanzen, Bibliotheken, Pfad-Mapping, Benutzer, Systemwerte |
+| `embycache_run.py` | Hauptscript (Report / Dry-Run / Run) |
+| `embycache_cleaner.py` | Findet Dateien auf dem Cache, die nicht in der Exclude-Liste stehen (Waisen), und räumt sie auf Wunsch weg |
+| `embycache_lib.py` | Gemeinsamer Code (Config, Pfade, Emby-API, Mover, Lock, Logging) |
+| `embycache_settings.json` | Konfiguration (siehe unten) |
+| `embycache_exclude.txt` | Aktuell gecachte Dateien; wird atomar geschrieben |
+| `embycache.lock` | Verhindert parallele Läufe |
+| `logs/` | Rotierende Logs (10 MB × 20) |
 
-Standardmodus beim Aufruf ohne Argumente. Berechnet alle Verschiebungen und zeigt Statistiken, führt aber keine Dateioperationen aus.
+Alle Pfade sind relativ zum **Script-Verzeichnis**, nicht zum Arbeitsverzeichnis – das Script läuft also auch aus cron/User Scripts ohne `cd`. Mit `EMBYCACHE_DIR` lässt sich das Arbeitsverzeichnis trotzdem umbiegen.
 
-`python3 embycache_run.py`
+## Konfiguration (`embycache_settings.json`)
 
-### Modus: Real (Scharf)
+```jsonc
+{
+    "cache_path": "/mnt/cache",            // Pool, auf den gecacht wird (z.B. /mnt/master)
+    "array_path": "/mnt/user0",            // Array-Sicht ohne Pools
+    "user_path": "/mnt/user",              // Sicht, die Emby gemountet hat
+    "array_disks_glob": "/mnt/disk[0-9]*", // echte Array-Disks (nur für array_source: disk)
+    "array_source": "user0",               // rsync-Quelle: user0 = wie das Original, disk = /mnt/diskN (am FUSE vorbei)
 
-Führt die Aktionen wirklich durch (rsync & mover) und aktualisiert die `embycache_exclude.txt`.
+    "instances": [
+        {
+            "servername": "Nostromo",
+            "url": "http://192.168.7.10:8096",
+            "api_key": "…",
+            "path_mappings": {                 // Docker-Pfad -> Host-Pfad, nur gecachte Bibliotheken
+                "/media/Filme":  "/mnt/user/Filme",
+                "/media/Serien": "/mnt/user/Serien"
+            }
+        }
+    ],
+    "path_mappings": {},                   // optional: globales Mapping für alle Instanzen
 
-`python3 embycache_run.py --run`
+    "valid_users": [],                     // User-IDs; leer = alle Benutzer (auch Dict {id: {...}} wird akzeptiert)
+    "number_episodes": 3,                  // Zähl-Modus: Folgen nach der aktuellen vorladen
+    "cache_budget": "",                    // Budget-Modus: z.B. "2.5T" – leer = Zähl-Modus
+    "movie_share_percent": 50,             // Budget-Modus: Anteil Filme am Benutzer-Budget (weich, nach Bytes)
+    "max_episodes_per_series": 0,          // Budget-Modus: Folgen pro Serie höchstens (0 = das Budget entscheidet)
+    "max_resume_items": 10,                // Weiterschauen-Einträge pro Benutzer
+    "max_favorite_series": 10,             // Favoriten-Serien pro Benutzer (0 = aus)
+    "min_free_percent": 20,                // darunter wird nichts mehr kopiert (ZFS: nicht unter 15–20 gehen)
+    "movie_mode": "folder",                // folder = ganzer Filmordner, file = nur gleichnamige Dateien
+    "create_share_root": false,            // Share-Wurzel auf dem Pool automatisch anlegen (siehe ZFS-Hinweis)
+    "mover_bin": "",                       // leer = /usr/libexec/unraid/move bzw. /usr/local/sbin/move
+    "mover_debug_level": 0,                // -d für das move-Binary (1 = Dateien loggen)
+    "rsync_args": ["-aAX", "--numeric-ids"], // vollständige rsync-Optionen, Default = Original
+    "fill_tool": "rsync",                  // Array -> Cache: rsync oder mover (Unraid move-Binary, siehe Hinweise)
+    "api_timeout": 10
+}
+```
 
-## <a id="faq"></a>6\. FAQ & Troubleshooting
+### Budget-Modus
 
-⚠️ Wichtiger Hinweis zum Mover
+Zähler wissen nichts über Dateigrössen: drei Folgen einer SD-Serie sind 1 GB, drei Remux-Folgen 30 GB. Mit `cache_budget` (z.B. `"2.5T"`) rechnet das Script in Bytes:
 
-Das Skript nutzt den Unraid Mover für den Cleanup (Cache -> Array). Damit das funktioniert, muss die Datei `embycache_exclude.txt` korrekt geschrieben werden. Tools wie das "Mover Tuning Plugin" können diese Liste nutzen, um geschützte Dateien auf dem Cache zu ignorieren.
+* Das Budget wird **fair auf die aktiven Benutzer** verteilt (Benutzer ohne «Weiterschauen»/Favoriten zählen nicht). Was ein Benutzer nicht braucht, fliesst automatisch an die anderen (Water-Filling). Einzelnen Benutzern lässt sich ein festes Budget geben: `"valid_users": {"<id>": {"budget": "300G"}, "<id2>": {}}`.
+* Innerhalb des Benutzer-Budgets werden **Filme und Serien nach Bytes** im Verhältnis `movie_share_percent` gefüllt – weich: ist eine Kategorie leer, bekommt die andere den Rest. Filme in der Reihenfolge der Weiterschauen-Liste (neueste zuerst).
+* Serien werden **reihum** gefüllt: jede laufende Serie und jeder Favorit bekommt pro Runde eine Folge. Kleine Folgen ergeben so automatisch viele Stück, grosse wenige, und keine Serie kann das ganze Budget belegen. `max_episodes_per_series` deckelt zusätzlich (0 = nur das Budget entscheidet).
+* Passt ein Eintrag nicht mehr, wird seine Serie gestoppt (nie Folge 5 ohne Folge 4); ein zu grosser Film wird übersprungen, der nächste probiert.
+* Was nicht ins Budget passt, bleibt auf dem Array bzw. wird beim nächsten Lauf zurückgeräumt. Das Log zeigt pro Benutzer `Budget <Name>: belegt von zugeteilt (Filme …, Serien …) – nicht im Budget: …`.
 
-### Warum werden meine Filme nicht verschoben?
+Das Budget bezieht sich auf den Inhalt der Exclude-Liste, also auf das, was das Script auf dem Pool hält. `min_free_percent` und eine ZFS-Quota bleiben die harte Grenze darunter.
 
-Prüfe das **Path Mapping** in der `embycache_settings.json`. Wenn der Docker-Pfad (Emby) nicht in einen gültigen Unraid-Pfad übersetzt werden kann, ignoriert das Skript die Datei sicherheitshalber.
+Filme: Liegt der Film in einem eigenen Ordner, wird der ganze Ordner mitgenommen (Untertitel, nfo, Extras). Liegt er direkt im Bibliotheksordner (flache Ablage), werden nur die Dateien mit gleichem Basisnamen genommen – die Bibliothek wird nie als Ganzes verschoben. Ordner-Items (DVD/BluRay-Struktur) werden als Ordner behandelt.
 
-### Wird mein laufender Film unterbrochen?
+## Befehle
 
-**Nein.** Die Active-Protection-Logik erkennt laufende Streams und überspringt diese Dateien bei jeglichen Verschiebe-Aktionen.
+| Befehl | Wirkung |
+| --- | --- |
+| `python3 embycache_run.py --show-on-deck` | Report: On-Deck-Liste mit Speicherort (CACHE/ARRAY), Grösse und Grund |
+| `python3 embycache_run.py` | Dry-Run: alle geplanten Aktionen, keine Dateioperationen |
+| `python3 embycache_run.py --run` | Scharf |
+| `python3 embycache_cleaner.py` | Waisen auf dem Cache anzeigen |
+| `python3 embycache_cleaner.py --run` | Waisen aufs Array verschieben |
+| `python3 embycache_cleaner.py --add-to-list` | Waisen in die Exclude-Liste aufnehmen |
 
-### Wo finde ich Logs?
+Umgebungsvariablen: `EMBYCACHE_MODE` (dry / report / run), `EMBYCACHE_DIR`, `EMBYCACHE_CONFIG`, `EMBYCACHE_LOG_LEVEL`, `EMBYCACHE_MIN_FREE_PERCENT`, `EMBYCACHE_MOVER_DEBUG`, `EMBYCACHE_RSYNC_ARGS`, `EMBYCACHE_FILL_TOOL`, `EMBYCACHE_CACHE_BUDGET`. Der Hilfetext im Kopf jedes Scripts beschreibt sie.
 
-Ausführliche Logs (mit kompletten Pfaden) liegen in `logs/embycache.log`. Die Konsolenausgabe ist bewusst minimal gehalten.
+## Worauf du auf Unraid achten musst
 
-## 7\. Dateistruktur
+**Share-Einstellung der Medien-Shares.** Steht der Share auf *Primary: Cache, Secondary: Array, Mover: Cache → Array* (alt: «Cache: Yes»), schiebt der reguläre Mover die gecachten Dateien nachts wieder zurück. Dann brauchst du **Mover Tuning** mit der Option «File list path» auf `embycache_exclude.txt`. Steht der Share auf *Array only*, fasst der reguläre Mover ihn gar nicht an und die Exclude-Liste ist nur für den Cleanup des Scripts nötig – vorher aber mit einer Datei testen, dass das `move`-Binary den Pool-Pfad trotzdem aufs Array schiebt (`mover_debug_level: 1`).
 
-Die folgenden Dateien befinden sich im Skript-Verzeichnis:
+**ZFS-Pool als Cache.** Ein Share-Ordner, der per `mkdir` auf dem Pool entsteht, ist ein normales Verzeichnis, kein Dataset. Datasets legt Unraid nur über die User-Share-Mechanik an. Lege die Share-Wurzeln deshalb vorher an (`zfs create pool/Filme`), das Script bricht sonst mit einem Hinweis ab (`create_share_root` bleibt bewusst `false`). Eine `zfs set quota=…` auf diese Datasets ist die harte Grenze gegen einen vollen Pool – zusätzlich zu `min_free_percent`, das bei einem Dataset mit Quota gegen die Quota rechnet.
 
-*   `embycache_setup.py`: Der Konfigurations-Wizard.
-*   `embycache_run.py`: Das Hauptskript.
-*   `embycache_settings.json`: Speichert Server, User und Limits.
-*   `embycache_exclude.txt`: Liste der Dateien, die aktuell auf dem Cache liegen (wird vom Mover-Tuning Plugin genutzt, um diese Dateien NICHT zu verschieben).
-*   `logs/`: Ordner für Rotierende Logs (Max 20 Dateien à 10MB).
+**Kopieren und Mover wie im Original.** Mit den Defaults sind die beiden Aufrufe identisch mit der seit über einem Jahr produktiven Version: `rsync -aAX --numeric-ids /mnt/user0/<Datei> /mnt/<pool>/<Datei>` pro Datei, danach `unlink` der Quelle; Cache → Array über `/usr/libexec/unraid/move` (sonst `/usr/local/sbin/move`, `/usr/local/bin/move`) mit den Cache-Pfaden zeilenweise auf stdin, ohne `-d`, solange `mover_debug_level` 0 ist. Neu ist nur, was *nach* dem Aufruf passiert: Exit-Code und stderr werden geloggt, die Grösse wird vor dem Löschen verglichen, und nach dem Mover wird geprüft, was noch auf dem Cache liegt. `EMBYCACHE_LOG_LEVEL=DEBUG` zeigt jeden Aufruf wörtlich.
 
-EmbyCache | Version 6.0 Multi-Instance
+**Array → Cache über den Unraid-Mover (`fill_tool: mover`).** Der Stock-Mover bringt Dateien von «prefer»-Shares mit `find /mnt/user0/<share> | move` auf den Pool; das Script übergibt dem Binary dieselben Pfade (bevorzugt den echten `/mnt/diskN`-Pfad). Welchen Pool das Binary nimmt, steht in der Share-Konfiguration – für einen Share auf *Array only* gibt es keinen, dann bleibt die Datei liegen und das Script meldet es. Deshalb: mit `mover_debug_level: 1` und einer einzelnen Datei testen, bevor du umstellst. Vorteil gegenüber rsync: fuser-Check und keine doppelte Datei bei Abbruch; der Cleanup (Cache → Array) läuft immer über das Binary.
+
+**Emby-Mounts.** Emby muss die Medien über `/mnt/user/...` sehen (nicht `/mnt/user0` oder `/mnt/diskN`), sonst bricht der transparente Wechsel zwischen Pool und Array.
+
+**Hardlinks.** Sind Medien per Hardlink mit einem Download-Ordner verbunden (*arr-Setups), trennt rsync + löschen den Hardlink; nach dem Zurückschieben liegt die Datei doppelt.
+
+**Duplikate.** Bricht ein Kopiervorgang ab, bleibt die Quelle auf dem Array und rsync räumt seine Temp-Datei weg. Bleibt trotzdem einmal eine Datei doppelt liegen (z.B. Löschen fehlgeschlagen), steht es als ERROR im Log; `embycache_cleaner.py` findet solche Dateien.
+
+## FAQ
+
+**Warum passiert nichts?** Meist fehlt das Path-Mapping: Ohne Übersetzung des Docker-Pfads wird ein Item mit WARNING übersprungen (`--show-on-deck` zeigt es). Prüfe auch `valid_users` – leer heisst alle.
+
+**Wird mein laufender Film unterbrochen?** Nein. Laufende Wiedergaben werden über `/Sessions` erkannt und weder kopiert noch zurückgeschoben. Wenn Sessions nicht abrufbar sind, wird nichts vom Cache entfernt.
+
+**Wo sind die Logs?** `logs/embycache.log` und `logs/embycache_cleaner.log`, mit vollständigen Pfaden. `EMBYCACHE_LOG_LEVEL=DEBUG` zeigt zusätzlich die Mover-Aufrufe.

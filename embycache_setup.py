@@ -1,151 +1,176 @@
-import json
-import requests
-import os
-from pathlib import Path
+#!/usr/bin/env python3
+"""
+EmbyCache – interaktiver Konfigurator. Legt embycache_settings.json an oder aktualisiert sie.
 
-# Diese Pfade werden ignoriert
-IGNORED_PREFIXES = ["/config", "/metadata", "/transcoding-temp", "/cache", "/logs", "/var", "/boot"]
+Aufruf:  python3 embycache_setup.py
+Ort der Settings: $EMBYCACHE_CONFIG bzw. $EMBYCACHE_DIR/embycache_settings.json (Default: Script-Verzeichnis)
+
+Fragt Emby-Instanzen (URL, API-Key) ab, liest Bibliotheken und Benutzer von jeder Instanz, schlägt Host-Pfade
+für die Docker-Pfade vor und schreibt alle Systemwerte (Cache/Array-Pfade, Limits, Freiplatz).
+Alle Werte lassen sich später auch direkt in der JSON ändern; Schlüssel und Defaults stehen in embycache_lib.DEFAULTS.
+"""
+import copy
+import json
+import sys
+
+from embycache_lib import CONFIG_FILE, DEFAULTS, EmbyApi, save_config
+
+# Emby-interne Pfade, die nie Medien sind
+IGNORED_PREFIXES = ("/config", "/metadata", "/transcoding-temp", "/cache", "/logs", "/var", "/boot", "/tmp")
+
 
 def ask(prompt, current):
     res = input(f"{prompt} [{current}]: ").strip()
-    return res if res else current
+    return res if res else str(current)
 
-def get_emby_data(instances):
-    data = {"paths": set(), "libraries": set(), "users": {}}
-    for i, inst in enumerate(instances):
-        url, key = inst.get("url", "").rstrip('/'), inst.get("api_key", "")
-        if not url or not key: continue
+
+def ask_int(prompt, current):
+    while True:
+        val = ask(prompt, current)
         try:
-            print(f"   ...lese Instanz {i+1} ({url})...")
-            # Bibliotheken
-            r = requests.get(f"{url}/Library/VirtualFolders", params={"api_key": key}, timeout=5)
-            for lib in r.json():
-                data["libraries"].add(lib["Name"])
-                for loc in lib.get("Locations", []):
-                    # Filter: Systempfade ignorieren
-                    if any(loc.startswith(prefix) for prefix in IGNORED_PREFIXES): continue
-                    data["paths"].add(loc)
-            # User (Nur für interne Logik, Anzeige erfolgt in Schritt 4 neu)
-            r_u = requests.get(f"{url}/Users", params={"api_key": key}, timeout=5)
-            for u in r_u.json():
-                data["users"][u["Id"]] = u["Name"]
-        except Exception as e:
-            print(f"   WARNUNG Instanz {i+1}: {e}")
-    return data
+            return int(val)
+        except ValueError:
+            print("   Bitte eine ganze Zahl eingeben.")
 
-def suggest_mapping(internal_path):
-    """Versucht intelligenten Host-Pfad zu raten."""
-    # Ersetze gängige Docker-Mount-Points durch /mnt/user
-    prefixes = ["/data", "/media", "/mnt"]
-    for prefix in prefixes:
-        if internal_path.startswith(prefix):
-            # z.B. /data/Serien -> /mnt/user/Serien
-            # Schneide Prefix ab und hänge Rest an /mnt/user an
-            suffix = internal_path[len(prefix):]
-            if suffix.startswith("/"): suffix = suffix[1:]
-            return f"/mnt/user/{suffix}"
-    
-    return "/mnt/user" + internal_path
+
+def suggest_mapping(internal_path, user_path):
+    """Rät den Host-Pfad: /data/Serien oder /media/Serien -> /mnt/user/Serien."""
+    for prefix in ("/data", "/media", "/mnt/user", "/mnt"):
+        if internal_path == prefix or internal_path.startswith(prefix + "/"):
+            return f"{user_path}/{internal_path[len(prefix):].lstrip('/')}".rstrip("/")
+    return f"{user_path}{internal_path}"
+
+
+def read_instance(inst, timeout):
+    """Bibliotheken (Name -> Docker-Pfade) und Benutzer (Id -> Name) einer Instanz."""
+    api = EmbyApi(inst["url"], inst["api_key"], timeout)
+    libs, users = {}, {}
+    for lib in api.get("/Library/VirtualFolders") or []:
+        locs = [l for l in lib.get("Locations", []) if not l.startswith(IGNORED_PREFIXES)]
+        if locs:
+            libs[lib["Name"]] = locs
+    for u in api.get("/Users") or []:
+        users[u["Id"]] = u.get("Name", u["Id"])
+    return libs, users
+
 
 def setup():
-    cfg_p = Path("embycache_settings.json")
     cfg = {}
-    if cfg_p.exists():
-        try: cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
-        except: cfg = {}
-
-    # Defaults
-    cfg.setdefault("instances", [{"url": "http://10.87.100.200:8096", "api_key": ""}])
-    cfg.setdefault("path_mappings", {})
-    cfg.setdefault("libraries", [])
-    cfg.setdefault("valid_users", [])
-    cfg.setdefault("cache_path", "/mnt/cache")
-    cfg.setdefault("array_path", "/mnt/user0")
-    cfg.setdefault("number_episodes", 3)
-    cfg.setdefault("min_free_percent", 10)
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            print(f"Bestehende Konfiguration geladen: {CONFIG_FILE}")
+        except json.JSONDecodeError as e:
+            print(f"WARNUNG: {CONFIG_FILE} ist kein gültiges JSON ({e}) – wird neu erstellt.")
+    for key, val in DEFAULTS.items():
+        cfg.setdefault(key, copy.deepcopy(val))
 
     print("\n--- 1. Emby Server ---")
-    count = int(ask("Anzahl Instanzen", len(cfg["instances"])))
-    while len(cfg["instances"]) < count: cfg["instances"].append({"url": "http://IP:8096", "api_key": ""})
+    if not cfg["instances"]:
+        cfg["instances"] = [{"servername": "Emby", "url": "http://IP:8096", "api_key": ""}]
+    count = ask_int("Anzahl Instanzen", len(cfg["instances"]))
+    while len(cfg["instances"]) < count:
+        cfg["instances"].append({"servername": f"Emby{len(cfg['instances']) + 1}", "url": "http://IP:8096", "api_key": ""})
     cfg["instances"] = cfg["instances"][:count]
-    for i, inst in enumerate(cfg["instances"]):
-        print(f"   Server {i+1}:")
-        inst["url"] = ask("   URL", inst["url"])
-        inst["api_key"] = ask("   API Key", inst["api_key"])
+    for i, inst in enumerate(cfg["instances"], 1):
+        print(f"   Server {i}:")
+        inst["servername"] = ask("   Name", inst.get("servername", f"Emby{i}"))
+        inst["url"] = ask("   URL", inst.get("url", "")).rstrip("/")
+        inst["api_key"] = ask("   API Key", inst.get("api_key", ""))
 
-    print("\n--- Lade Daten... ---")
-    emby_data = get_emby_data(cfg["instances"])
+    print("\n--- Lade Daten von den Instanzen ---")
+    data = {}
+    for inst in cfg["instances"]:
+        try:
+            data[inst["servername"]] = read_instance(inst, cfg["api_timeout"])
+            libs, users = data[inst["servername"]]
+            print(f"   {inst['servername']}: {len(libs)} Bibliotheken, {len(users)} Benutzer")
+        except RuntimeError as e:
+            print(f"   WARNUNG {inst['servername']}: {e}")
+            data[inst["servername"]] = ({}, {})
 
-    print("\n--- 2. Pfad-Mapping (Pro Ordner) ---")
-    found_paths = sorted(list(emby_data["paths"]))
-    mappings = cfg.get("path_mappings", {})
-    
-    if found_paths:
-        print(f"   Gefunden: {len(found_paths)} Ordner.")
-        print("   Bitte bestätige den Host-Pfad für JEDEN Ordner:")
-        
-        new_mappings = {}
-        for p in found_paths:
-            # Bestehendes Mapping oder intelligenter Vorschlag
-            current = mappings.get(p, suggest_mapping(p))
-            val = ask(f"   Host-Pfad für '{p}'", current)
-            new_mappings[p] = val
-        
-        cfg["path_mappings"] = new_mappings
-    else:
-        print("   (Keine Medien-Pfade gefunden)")
-
-    print("\n--- 3. Bibliotheken ---")
-    avail = sorted(list(emby_data["libraries"]))
-    print(f"   Gefunden: {', '.join(avail)}")
-    cur_libs = ", ".join(cfg["libraries"]) if cfg["libraries"] else ", ".join(avail)
-    res = ask("   Welche überwachen? (Komma)", cur_libs)
+    print("\n--- 2. Bibliotheken ---")
+    all_libs = sorted({name for libs, _ in data.values() for name in libs})
+    print(f"   Gefunden: {', '.join(all_libs) or '(keine)'}")
+    current = ", ".join(cfg["libraries"]) if cfg["libraries"] else ", ".join(all_libs)
+    res = ask("   Welche cachen? (Komma-getrennt)", current)
     cfg["libraries"] = [l.strip() for l in res.split(",") if l.strip()]
 
-    # --- 4. BENUTZER (ANGEPASST MIT SERVER-SPALTE) ---
-    print("\n--- 4. Benutzer ---")
-    # Header
-    print(f"   {'ID':<32} | {'SERVER':<15} | {'NAME'}")
-    print("   " + "-" * 70)
-
-    # Wir iterieren hier erneut über die Instanzen, um die Server-Zuordnung für die Anzeige zu haben
+    print("\n--- 3. Pfad-Mapping (Docker-Pfad -> Host-Pfad) ---")
+    print("   Nur Pfade der gewählten Bibliotheken; alles andere fasst das Script nie an.")
+    old_global = cfg.get("path_mappings", {})
     for inst in cfg["instances"]:
-        url = inst.get("url", "").rstrip('/')
-        key = inst.get("api_key", "")
-        if not url or not key: continue
+        libs, _ = data[inst["servername"]]
+        paths = sorted({p for name, locs in libs.items() if name in cfg["libraries"] for p in locs})
+        if not paths:
+            print(f"   {inst['servername']}: keine Medienpfade gefunden")
+            continue
+        old = dict(old_global)
+        old.update(inst.get("path_mappings") or {})
+        new = {}
+        print(f"   {inst['servername']}:")
+        for p in paths:
+            new[p] = ask(f"     Host-Pfad für '{p}'", old.get(p, suggest_mapping(p, cfg["user_path"]))).rstrip("/")
+        inst["path_mappings"] = new
+    cfg["path_mappings"] = {}  # Mappings liegen jetzt pro Instanz
 
-        # Server-Name generieren (aus IP/URL)
-        try:
-            srv_name = url.replace("http://", "").replace("https://", "").split(":")[0]
-            if len(srv_name) > 15: srv_name = srv_name[:13] + ".."
-        except: srv_name = "Server"
-
-        try:
-            r = requests.get(f"{url}/Users", params={"api_key": key}, timeout=3)
-            if r.status_code == 200:
-                for u in r.json():
-                    print(f"   {u['Id']:<32} | {srv_name:<15} | {u['Name']}")
-            else:
-                print(f"   {'---':<32} | {srv_name:<15} | (Fehler: {r.status_code})")
-        except:
-            print(f"   {'---':<32} | {srv_name:<15} | (Offline)")
-
+    print("\n--- 4. Benutzer ---")
+    print(f"   {'ID':<34} | {'SERVER':<15} | NAME")
     print("   " + "-" * 70)
-    print("   Hinweis: Mehrere IDs können durch Komma getrennt werden (z.B. id1,id2).")
-
-    cur_usr = ", ".join(cfg["valid_users"])
-    res = ask("   User-IDs (Leer = Alle)", cur_usr)
-    
-    # Input am Komma splitten und säubern
-    cfg["valid_users"] = [u.strip() for u in res.split(",") if u.strip()]
+    for inst in cfg["instances"]:
+        _, users = data[inst["servername"]]
+        for uid, name in users.items():
+            print(f"   {uid:<34} | {inst['servername'][:15]:<15} | {name}")
+    print("   " + "-" * 70)
+    print("   Mehrere IDs mit Komma trennen. Leer = alle Benutzer aller Instanzen.")
+    vu = cfg["valid_users"]
+    old_budgets = {k: (v or {}).get("budget", "") for k, v in vu.items()} if isinstance(vu, dict) else {}
+    current = ", ".join(vu.keys() if isinstance(vu, dict) else vu)
+    res = ask("   User-IDs", current)
+    ids = [u.strip() for u in res.split(",") if u.strip()]
+    cfg["valid_users"] = ids
 
     print("\n--- 5. System ---")
-    cfg["cache_path"] = ask("   Cache Pfad", cfg["cache_path"])
-    cfg["array_path"] = ask("   Array Pfad", cfg["array_path"])
-    cfg["number_episodes"] = int(ask("   Anzahl Folgen", cfg["number_episodes"]))
-    cfg["min_free_percent"] = int(ask("   Min % Frei", cfg["min_free_percent"]))
+    cfg["cache_path"] = ask("   Cache-Pool (z.B. /mnt/cache oder /mnt/master)", cfg["cache_path"]).rstrip("/")
+    cfg["array_path"] = ask("   Array-Sicht ohne Pools", cfg["array_path"]).rstrip("/")
+    cfg["user_path"] = ask("   User-Share-Sicht", cfg["user_path"]).rstrip("/")
+    cfg["array_disks_glob"] = ask("   Glob für die Array-Disks", cfg["array_disks_glob"])
+    print("\n--- 6. Umfang: Zähl- oder Budget-Modus ---")
+    print("   Budget-Modus: Gesamtgrösse (z.B. 2.5T) wird fair auf die aktiven Benutzer verteilt,")
+    print("   Filme/Serien nach Bytes gefüllt, Serien reihum eine Folge pro Runde. Leer = Zähl-Modus.")
+    cfg["cache_budget"] = ask("   Cache-Budget gesamt (z.B. 2.5T; '-' = Zähl-Modus)", cfg["cache_budget"] or "-").strip()
+    if cfg["cache_budget"] in ("-", "0"):
+        cfg["cache_budget"] = ""
+    if cfg["cache_budget"]:
+        cfg["movie_share_percent"] = ask_int("   Anteil Filme am Benutzer-Budget in % (weich)", int(cfg["movie_share_percent"]))
+        cfg["max_episodes_per_series"] = ask_int("   Folgen pro Serie höchstens (0 = das Budget entscheidet)", cfg["max_episodes_per_series"])
+        if ids:
+            print("   Festes Budget für einzelne Benutzer? Format id=300G, mehrere mit Komma; leer = fair verteilen.")
+            current = ", ".join(f"{k}={v}" for k, v in old_budgets.items() if v and k in ids)
+            res = ask("   Benutzer-Budgets", current)
+            budgets = {}
+            for part in res.split(","):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    if k.strip() in ids and v.strip():
+                        budgets[k.strip()] = v.strip()
+            if budgets:
+                cfg["valid_users"] = {u: ({"budget": budgets[u]} if u in budgets else {}) for u in ids}
+    else:
+        cfg["number_episodes"] = ask_int("   Folgen vorladen (nach der aktuellen)", cfg["number_episodes"])
+    cfg["max_resume_items"] = ask_int("   Max. Weiterschauen-Einträge pro Benutzer", cfg["max_resume_items"])
+    cfg["max_favorite_series"] = ask_int("   Max. Favoriten-Serien pro Benutzer (0 = aus)", cfg["max_favorite_series"])
+    cfg["min_free_percent"] = ask_int("   Mindestens frei auf dem Cache in % (ZFS: 20 ist sinnvoll)", cfg["min_free_percent"])
+    cfg["movie_mode"] = ask("   Filme: 'folder' = ganzer Filmordner, 'file' = nur gleichnamige Dateien", cfg["movie_mode"])
 
-    with open(cfg_p, "w", encoding="utf-8") as f: json.dump(cfg, f, indent=4)
-    print("\n✔ Fertig.")
+    save_config(cfg)
+    print(f"\n✔ Gespeichert: {CONFIG_FILE}")
+    print("  Nächster Schritt: python3 embycache_run.py --show-on-deck")
 
-if __name__ == "__main__": setup()
+
+if __name__ == "__main__":
+    try:
+        setup()
+    except (KeyboardInterrupt, EOFError):
+        print("\nAbgebrochen, nichts gespeichert.")
+        sys.exit(1)

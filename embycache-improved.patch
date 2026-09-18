@@ -1,0 +1,2653 @@
+From 0912f32d22f8337704535b6194f7372d8923f9b4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Benj=20M=C3=BCller?= <claude@levelnext.cloud>
+Date: Wed, 16 Sep 2026 23:21:33 +0200
+Subject: [PATCH] Rewrite: Budget-Modus, sortierte Folgen, Freiplatz-Floor und
+ echtes Fehler-Logging
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Behebt die Abweichungen zwischen README v6.0 und Code sowie mehrere Bugs:
+
+- README und Code stimmen wieder überein (README.html entfernt, war veraltet)
+- Neu: Budget-Modus (cache_budget, z.B. "2.5T"): faire Verteilung auf aktive Benutzer mit Water-Filling,
+  feste Budgets pro Benutzer, Filme/Serien nach Bytes (movie_share_percent), Serien reihum eine Folge
+  pro Runde, Ketten stoppen ohne Lücke; ohne cache_budget bleibt der Zähl-Modus
+- Pfade relativ zum Script-Verzeichnis statt zum Arbeitsverzeichnis (cron/User Scripts)
+- min_free_percent wird jetzt vor jedem Kopiervorgang geprüft (bei ZFS-Quota gegen die Quota)
+- Nächste Folgen in Staffel-/Folgenreihenfolge nach der aktuellen Folge, statt erste N ungesehene
+- Favoriten: ab der ersten ungesehenen Folge
+- Array -> Cache per rsync von der echten Disk (/mnt/diskN) oder per fill_tool=mover über das move-Binary
+- rsync-Exit-Code und Grösse werden geprüft, stderr geloggt; Quelle nur nach Erfolg gelöscht
+- Cleanup (Cache -> Array) läuft vor dem Befüllen, wie im README beschrieben
+- Filme: ganzer Filmordner nur, wenn er nicht der Bibliotheks-Root ist; Ordner-Items (BDMV) als Ordner
+- Session-Schutz vergleicht relative Pfade, nicht nur Dateinamen
+- Emby nicht erreichbar -> kein Cleanup, Exclude-Liste bleibt geschützt
+- flock-Lockfile gegen parallele Läufe; Warnung, wenn der reguläre Mover läuft
+- Keine geschluckten Exceptions mehr; echte Fehlermeldungen mit Ursache
+- Exclude-Liste wird atomar geschrieben
+- valid_users leer = alle Benutzer; Dict-Format aus README akzeptiert
+- Pfad-Mappings pro Instanz (README-Format) und global
+- --show-on-deck implementiert; Modus und Schwellwerte per Umgebungsvariable umschaltbar
+- Kein `requests` mehr nötig: nur Standardbibliothek; API-Key als Header X-Emby-Token
+- Gemeinsamer Code in embycache_lib.py; Cleaner mit Session-Check und Mover-Output
+- .gitignore für Settings (API-Keys!), Exclude-Liste, Lock und Logs
+---
+ .gitignore           |   6 +
+ README.html          | 486 --------------------------
+ README.md            | 249 ++++++--------
+ embycache_cleaner.py | 240 ++++++-------
+ embycache_lib.py     | 432 ++++++++++++++++++++++++
+ embycache_run.py     | 787 ++++++++++++++++++++++++++++++++-----------
+ embycache_setup.py   | 285 +++++++++-------
+ 7 files changed, 1396 insertions(+), 1089 deletions(-)
+ create mode 100644 .gitignore
+ delete mode 100644 README.html
+ create mode 100644 embycache_lib.py
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..cc20c08
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++logs/
++embycache_settings.json
++embycache_exclude.txt
++embycache.lock
++__pycache__/
++*.pyc
+diff --git a/README.html b/README.html
+deleted file mode 100644
+index f8b533c..0000000
+--- a/README.html
++++ /dev/null
+@@ -1,486 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="de">
+-<head>
+-    <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    <title>EmbyCache Handbuch v6.0</title>
+-    <style>
+-        :root {
+-            --bg-color: #121212;
+-            --card-bg: #1e1e1e;
+-            --text-color: #e0e0e0;
+-            --text-muted: #b0b0b0;
+-            --accent-color: #4caf50; /* Emby Green */
+-            --secondary-color: #03a9f4; /* Blue */
+-            --success-color: #00e676;
+-            --warning-color: #ffa726;
+-            --danger-color: #ef5350;
+-            --code-bg: #263238;
+-            --border-radius: 12px;
+-            --border-color: #333;
+-        }
+-
+-        body {
+-            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+-            background-color: var(--bg-color);
+-            color: var(--text-color);
+-            line-height: 1.6;
+-            margin: 0;
+-            padding: 40px;
+-            max-width: 1280px;
+-            margin-left: auto;
+-            margin-right: auto;
+-        }
+-
+-        /* --- TYPOGRAPHY --- */
+-        h1 { 
+-            font-size: 3em; 
+-            border-bottom: 4px solid var(--accent-color); 
+-            padding-bottom: 20px; 
+-            margin-top: 0;
+-            color: #fff;
+-            letter-spacing: -1px;
+-        }
+-        h2 { 
+-            font-size: 1.8em;
+-            margin-top: 50px;
+-            border-left: 6px solid var(--accent-color); 
+-            padding-left: 20px; 
+-            background: linear-gradient(90deg, rgba(76, 175, 80, 0.1) 0%, transparent 100%);
+-            padding-top: 10px;
+-            padding-bottom: 10px;
+-            border-radius: 0 var(--border-radius) var(--border-radius) 0;
+-            color: #fff;
+-        }
+-        h3 { color: var(--secondary-color); margin-top: 30px; margin-bottom: 15px; border-bottom: 1px solid #333; display: inline-block; padding-bottom: 5px;}
+-        p { color: var(--text-muted); margin-bottom: 1.2em; font-size: 1.05em; }
+-        strong { color: #fff; font-weight: 600; }
+-
+-        /* --- FEATURES GRID --- */
+-        .feature-grid {
+-            display: grid;
+-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+-            gap: 20px;
+-            margin-bottom: 50px;
+-        }
+-        .feature-card {
+-            background-color: var(--card-bg);
+-            padding: 25px;
+-            border-radius: var(--border-radius);
+-            border: 1px solid var(--border-color);
+-            transition: transform 0.2s, box-shadow 0.2s;
+-        }
+-        .feature-card:hover { transform: translateY(-5px); border-color: var(--secondary-color); box-shadow: 0 10px 20px rgba(0,0,0,0.3); }
+-        .feature-title { font-weight: bold; color: #fff; margin-bottom: 10px; display: block; font-size: 1.2em; display: flex; align-items: center; }
+-        .feature-icon { font-size: 1.5em; margin-right: 15px; }
+-
+-        /* --- TOC --- */
+-        .toc-container {
+-            background-color: var(--card-bg);
+-            padding: 25px;
+-            border-radius: var(--border-radius);
+-            border-left: 5px solid var(--secondary-color);
+-            margin-bottom: 50px;
+-        }
+-        .toc-title { font-weight: bold; font-size: 1.2em; color: #fff; margin-bottom: 15px; display: block; }
+-        .toc-list { list-style: none; padding: 0; column-count: 2; }
+-        .toc-list li { margin-bottom: 10px; }
+-        .toc-list a { color: var(--text-muted); text-decoration: none; transition: color 0.2s; font-size: 1.1em; }
+-        .toc-list a:hover { color: var(--accent-color); text-decoration: none; padding-left: 5px; }
+-
+-        /* --- FILE BOXES --- */
+-        .file-box {
+-            background-color: var(--card-bg);
+-            border: 1px solid var(--border-color);
+-            padding: 25px;
+-            border-radius: var(--border-radius);
+-            margin-bottom: 20px;
+-            display: flex;
+-            align-items: center;
+-            justify-content: space-between;
+-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+-        }
+-        .file-info { flex-grow: 1; margin-left: 20px; }
+-        .file-name { font-family: 'Consolas', monospace; font-size: 1.4em; color: var(--accent-color); font-weight: bold; display: block;}
+-        .file-desc { color: var(--text-muted); margin-top: 5px; display: block; }
+-        .file-icon { font-size: 2em; color: #555; }
+-
+-        /* --- INSTALLATION STEPS --- */
+-        .step-list { list-style: none; padding: 0; counter-reset: step-counter; }
+-        .step-list li { 
+-            margin-bottom: 20px; 
+-            background: var(--card-bg); 
+-            padding: 20px 20px 20px 60px;
+-            border-radius: var(--border-radius); 
+-            position: relative;
+-            border: 1px solid var(--border-color);
+-        }
+-        .step-list li::before {
+-            counter-increment: step-counter;
+-            content: counter(step-counter);
+-            position: absolute;
+-            left: 15px;
+-            top: 50%;
+-            transform: translateY(-50%);
+-            background-color: var(--accent-color);
+-            color: #fff;
+-            width: 30px;
+-            height: 30px;
+-            text-align: center;
+-            line-height: 30px;
+-            border-radius: 50%;
+-            font-weight: bold;
+-        }
+-        .step-title { font-weight: bold; color: #fff; display: block; margin-bottom: 8px; font-size: 1.2em; border-bottom: 1px solid #333; padding-bottom: 5px; }
+-
+-        /* --- CONFIGURATION TABLES & CODE --- */
+-        table {
+-            width: 100%;
+-            border-collapse: collapse;
+-            margin-top: 10px;
+-        }
+-        th, td { border: 1px solid var(--border-color); padding: 10px; text-align: left; }
+-        /* Hier wird der Umbruch in der ersten Spalte verhindert */
+-        th:first-child, td:first-child { white-space: nowrap; }
+-        
+-        th { background-color: #2c2c2c; color: var(--accent-color); text-transform: uppercase; font-size: 0.9em; letter-spacing: 1px; font-weight: 700; }
+-        tr:hover { background-color: #252525; }
+-
+-        pre {
+-            background-color: var(--code-bg);
+-            padding: 25px;
+-            border-radius: var(--border-radius);
+-            overflow-x: auto;
+-            border: 1px solid var(--border-color);
+-            color: #eceff1;
+-            font-family: 'Consolas', 'Monaco', monospace;
+-            font-size: 0.95em;
+-            line-height: 1.5;
+-            box-shadow: inset 0 0 10px rgba(0,0,0,0.3);
+-        }
+-        .code-comment { color: #78909c; font-style: italic; }
+-        .code-key { color: #80cbc4; }
+-        .code-string { color: #c3e88d; }
+-        .code-number { color: #f78c6c; }
+-
+-        /* --- BADGES --- */
+-        .badge { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 0.75em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; margin-left: 10px;}
+-        .badge-ver { background-color: var(--success-color); color: #121212; vertical-align: middle; }
+-        .badge-wiz { background-color: #ab47bc; color: white; }
+-        .badge-run { background-color: #29b6f6; color: white; }
+-
+-        /* --- COLLAPSIBLE --- */
+-        details.main-section {
+-            background-color: var(--card-bg);
+-            margin-bottom: 20px;
+-            border-radius: var(--border-radius);
+-            border: 1px solid var(--border-color);
+-            overflow: hidden;
+-        }
+-        details.main-section > summary {
+-            padding: 20px;
+-            cursor: pointer;
+-            background-color: #252525;
+-            list-style: none;
+-            display: flex;
+-            align-items: center;
+-            justify-content: space-between;
+-            font-weight: bold;
+-            color: #fff;
+-            font-size: 1.1em;
+-        }
+-        details.main-section > summary:hover { background-color: #2f2f2f; }
+-        details.main-section > summary::after { content: '+'; font-size: 1.5em; color: var(--accent-color); }
+-        details.main-section[open] > summary::after { content: '-'; }
+-        details.main-section > summary::-webkit-details-marker { display: none; }
+-        .section-content { padding: 25px; }
+-
+-        /* --- EMERGENCY BOX --- */
+-        .emergency-box {
+-            border: 2px solid var(--danger-color);
+-            background: linear-gradient(135deg, rgba(239, 83, 80, 0.15) 0%, rgba(30, 30, 30, 1) 100%);
+-            padding: 30px;
+-            border-radius: var(--border-radius);
+-            margin-top: 40px;
+-        }
+-        .emergency-header { color: var(--danger-color); font-weight: bold; font-size: 1.5em; display: flex; align-items: center; margin-bottom: 15px;}
+-
+-    </style>
+-</head>
+-<body>
+-
+-    <header>
+-        <h1>🎬 EmbyCache <span class="badge badge-ver">v6.0 Multi-Server</span></h1>
+-        <p>Intelligentes Caching-System für Unraid: Verschiebt Medien basierend auf Nutzerverhalten von Emby auf die SSD.</p>
+-    </header>
+-
+-    <div class="feature-grid">
+-        <div class="feature-card">
+-            <span class="feature-title"><span class="feature-icon">🌐</span>Multi-Server</span>
+-            Unterstützt mehrere Emby-Instanzen gleichzeitig. Benutzer und Pfade werden pro Server getrennt verwaltet.
+-        </div>
+-        <div class="feature-card">
+-            <span class="feature-title"><span class="feature-icon">🧹</span>Smart Cleanup</span>
+-            <strong>Zuerst aufräumen:</strong> Alte Dateien werden erst zurück aufs Array verschoben, um Platz für neue On-Deck Inhalte zu schaffen.
+-        </div>
+-        <div class="feature-card">
+-            <span class="feature-title"><span class="feature-icon">🍿</span>Binge-Ready</span>
+-            Erkennt Serien automatisch. Lädt nicht nur die aktuelle, sondern auch die nächsten X Episoden vor.
+-        </div>
+-        <div class="feature-card">
+-            <span class="feature-title"><span class="feature-icon">🛑</span>Active Protection</span>
+-            Prüft live via API, ob eine Datei abgespielt wird. Verhindert Verschieben/Löschen während der Wiedergabe.
+-        </div>
+-        <div class="feature-card">
+-            <span class="feature-title"><span class="feature-icon">👤</span>Granulare Kontrolle</span>
+-            Limits (Anzahl Filme/Episoden) können pro Benutzer und pro Bibliothek individuell eingestellt werden.
+-        </div>
+-        <div class="feature-card">
+-            <span class="feature-title"><span class="feature-icon">🗺️</span>Path Mapping</span>
+-            Übersetzt Docker-Pfade (<code>/media/...</code>) zuverlässig in Unraid Host-Pfade (<code>/mnt/user/...</code>).
+-        </div>
+-        <div class="feature-card">
+-            <span class="feature-title"><span class="feature-icon">👀</span>On-Deck Report</span>
+-            Der Schalter <code>--show-on-deck</code> zeigt exakt an, was geplant ist, ohne eine einzige Datei zu bewegen.
+-        </div>
+-        <div class="feature-card">
+-            <span class="feature-title"><span class="feature-icon">📂</span>Auto-Detection</span>
+-            Erkennt automatisch Bibliotheks-Typen (Filme vs. Serien) und schlägt passende Einstellungen vor.
+-        </div>
+-    </div>
+-
+-    <div class="toc-container">
+-        <span class="toc-title">Inhaltsverzeichnis</span>
+-        <ul class="toc-list">
+-            <li><a href="#installation">1. Installation & Setup</a></li>
+-            <li><a href="#files">2. Die Script-Dateien</a></li>
+-            <li><a href="#structure">3. JSON Struktur & Config</a></li>
+-            <li><a href="#workflow">4. Logik & Ablauf</a></li>
+-            <li><a href="#commands">5. Befehle & Ausführung</a></li>
+-            <li><a href="#faq">6. FAQ & Troubleshooting</a></li>
+-        </ul>
+-    </div>
+-
+-    <details class="main-section" id="installation">
+-        <summary><h2>1. Installation & Setup</h2></summary>
+-        <div class="section-content">
+-            <ul class="step-list">
+-                <li>
+-                    <span class="step-title">Schritt 1: Vorbereitung</span>
+-                    Stelle sicher, dass Python 3 und die Library <code>requests</code> auf deinem Unraid Server installiert sind.<br>
+-                    <code>pip install requests</code>
+-                </li>
+-                <li>
+-                    <span class="step-title">Schritt 2: Dateien kopieren</span>
+-                    Erstelle einen Ordner (z.B. <code>/mnt/user/system/scripts/embycache</code>) und kopiere <code>embycache_setup.py</code> und <code>embycache_run.py</code> hinein.
+-                </li>
+-                <li>
+-                    <span class="step-title">Schritt 3: Setup Wizard starten</span>
+-                    Führe den Konfigurator aus:<br>
+-                    <code>python3 embycache_setup.py</code><br>
+-                    Folge den Anweisungen, um Server, API-Keys und Pfade zu definieren.
+-                </li>
+-                <li>
+-                    <span class="step-title">Schritt 4: Testlauf</span>
+-                    Prüfe die Konfiguration mit dem Report-Modus:<br>
+-                    <code>python3 embycache_run.py --show-on-deck</code>
+-                </li>
+-            </ul>
+-        </div>
+-    </details>
+-
+-    <details class="main-section" id="files">
+-        <summary><h2>2. Die Script-Dateien</h2></summary>
+-        <div class="section-content">
+-            <div class="file-box">
+-                <span class="file-icon">🧙‍♂️</span>
+-                <div class="file-info">
+-                    <span class="file-name">embycache_setup.py <span class="badge badge-wiz">Wizard</span></span>
+-                    <span class="file-desc">Interaktiver Konfigurator. Liest Server-Daten, erstellt/updatet die JSON und erkennt Bibliotheken.</span>
+-                </div>
+-            </div>
+-
+-            <div class="file-box">
+-                <span class="file-icon">⚙️</span>
+-                <div class="file-info">
+-                    <span class="file-name">embycache_run.py <span class="badge badge-run">Core</span></span>
+-                    <span class="file-desc">Das Hauptskript. Berechnet On-Deck, schützt aktive Streams, verschiebt Dateien (rsync/mover).</span>
+-                </div>
+-            </div>
+-
+-            <div class="file-box">
+-                <span class="file-icon">📄</span>
+-                <div class="file-info">
+-                    <span class="file-name">embycache_settings.json</span>
+-                    <span class="file-desc">Speichert die gesamte Konfiguration (Server, User, Limits, Pfade) in hierarchischer Struktur.</span>
+-                </div>
+-            </div>
+-        </div>
+-    </details>
+-
+-    <details class="main-section" id="structure">
+-        <summary><h2>3. JSON Struktur & Config</h2></summary>
+-        <div class="section-content">
+-            <p>Die <code>embycache_settings.json</code> ist das Herzstück. Hier ein detailliertes Beispiel mit 2 Servern, 2 Usern und unterschiedlichen Bibliothekstypen.</p>
+-
+-<pre>
+-{
+-    <span class="code-comment">// Globale Pfade für Unraid</span>
+-    <span class="code-key">"cache_path"</span>: <span class="code-string">"/mnt/cache"</span>,
+-    <span class="code-key">"user_path"</span>: <span class="code-string">"/mnt/user"</span>,
+-    <span class="code-key">"array_path"</span>: <span class="code-string">"/mnt/user0"</span>,
+-    <span class="code-key">"min_free_percent"</span>: <span class="code-number">40</span>,
+-
+-    <span class="code-comment">// Liste der Emby-Instanzen</span>
+-    <span class="code-key">"instances"</span>: [
+-        {
+-            <span class="code-key">"servername"</span>: <span class="code-string">"HomeServer"</span>,
+-            <span class="code-key">"url"</span>: <span class="code-string">"http://192.168.1.10:8096"</span>,
+-            <span class="code-key">"api_key"</span>: <span class="code-string">"api_key_home_server_123"</span>,
+-            <span class="code-key">"path_mappings"</span>: {
+-                <span class="code-string">"/media/Filme"</span>: <span class="code-string">"/mnt/user/Filme"</span>,
+-                <span class="code-string">"/media/Serien"</span>: <span class="code-string">"/mnt/user/Serien"</span>
+-            }
+-        },
+-        {
+-            <span class="code-key">"servername"</span>: <span class="code-string">"Ferienhaus"</span>,
+-            <span class="code-key">"url"</span>: <span class="code-string">"http://192.168.1.20:8096"</span>,
+-            <span class="code-key">"api_key"</span>: <span class="code-string">"api_key_remote_server_456"</span>,
+-            <span class="code-key">"path_mappings"</span>: {
+-                <span class="code-string">"/data/Movies"</span>: <span class="code-string">"/mnt/user/Movies"</span>,
+-                <span class="code-string">"/data/TV"</span>: <span class="code-string">"/mnt/user/TV"</span>
+-            }
+-        }
+-    ],
+-
+-    <span class="code-comment">// Konfigurierte Benutzer (Key ist die Emby User ID)</span>
+-    <span class="code-key">"valid_users"</span>: {
+-        <span class="code-comment">// User 1 auf dem Hauptserver (Mixed Content)</span>
+-        <span class="code-key">"a1b2c3d4e5f6..."</span>: {
+-            <span class="code-key">"username"</span>: <span class="code-string">"Papa"</span>,
+-            <span class="code-key">"on_server"</span>: <span class="code-string">"HomeServer"</span>,
+-            <span class="code-key">"libraries"</span>: {
+-                <span class="code-key">"Action Filme"</span>: {
+-                    <span class="code-key">"libraries_type"</span>: <span class="code-string">"movies"</span>,
+-                    <span class="code-key">"max_use_count_on_deck"</span>: <span class="code-number">5</span>
+-                },
+-                <span class="code-key">"Serien Highlights"</span>: {
+-                    <span class="code-key">"libraries_type"</span>: <span class="code-string">"serien"</span>,
+-                    <span class="code-key">"max_use_count_on_deck"</span>: <span class="code-number">10</span>,
+-                    <span class="code-key">"number_episodes"</span>: <span class="code-number">3</span>
+-                }
+-            }
+-        },
+-        <span class="code-comment">// User 2 auf dem Remote Server (Nur Serien)</span>
+-        <span class="code-key">"9876543210ab..."</span>: {
+-            <span class="code-key">"username"</span>: <span class="code-string">"Kids"</span>,
+-            <span class="code-key">"on_server"</span>: <span class="code-string">"Ferienhaus"</span>,
+-            <span class="code-key">"libraries"</span>: {
+-                <span class="code-key">"Cartoons"</span>: {
+-                    <span class="code-key">"libraries_type"</span>: <span class="code-string">"serien"</span>,
+-                    <span class="code-key">"max_use_count_on_deck"</span>: <span class="code-number">20</span>,  <span class="code-comment">// Mehr Auswahl für Kinder</span>
+-                    <span class="code-key">"number_episodes"</span>: <span class="code-number">5</span>   <span class="code-comment">// Binge-Faktor hoch</span>
+-                }
+-            }
+-        }
+-    }
+-}
+-</pre>
+-        </div>
+-    </details>
+-
+-    <details class="main-section" id="workflow">
+-        <summary><h2>4. Logik & Ablauf</h2></summary>
+-        <div class="section-content">
+-            <p>Das Skript arbeitet strikt sequenziell, um Datenverlust oder volle Caches zu vermeiden.</p>
+-            
+-            <table>
+-                <tr>
+-                    <th>Phase</th>
+-                    <th>Aktion</th>
+-                    <th>Beschreibung</th>
+-                </tr>
+-                <tr>
+-                    <td><strong>1. Analyse</strong></td>
+-                    <td>Daten sammeln</td>
+-                    <td>Liest für jeden User "Weiterschauen" aus. Berechnet bei Serien zusätzlich die nächsten X Episoden und erstellt eine Liste aller benötigten Dateien (On-Deck).</td>
+-                </tr>
+-                <tr>
+-                    <td><strong>2. Schutz</strong></td>
+-                    <td>Session Check</td>
+-                    <td>Fragt alle Server ab: Welche Datei wird <strong>jetzt gerade</strong> abgespielt? Diese Pfade landen auf einer internen Blacklist für Verschiebungen.</td>
+-                </tr>
+-                <tr>
+-                    <td><strong>3. Cleanup</strong></td>
+-                    <td>Cache -> Array</td>
+-                    <td>Dateien, die NICHT mehr auf der neuen On-Deck-Liste stehen (und nicht abgespielt werden), werden vom Cache auf das Array verschoben. <br><em>Ziel: Platz schaffen.</em></td>
+-                </tr>
+-                <tr>
+-                    <td><strong>4. Move</strong></td>
+-                    <td>Array -> Cache</td>
+-                    <td>Die neuen On-Deck-Dateien werden vom Array auf den Cache kopiert (rsync). <br><em>Ziel: Performance.</em></td>
+-                </tr>
+-            </table>
+-        </div>
+-    </details>
+-
+-    <details class="main-section" id="commands">
+-        <summary><h2>5. Befehle & Ausführung</h2></summary>
+-        <div class="section-content">
+-            
+-            <h3>Modus: Report (Nur schauen)</h3>
+-            <p>Zeigt an, was das Skript tun würde und welche Medien als "On Deck" erkannt werden. Ideal zur Fehlersuche.</p>
+-            <pre>python3 embycache_run.py --show-on-deck</pre>
+-
+-            <h3>Modus: Dry-Run (Simulation)</h3>
+-            <p>Standardmodus beim Aufruf ohne Argumente. Berechnet alle Verschiebungen und zeigt Statistiken, führt aber keine Dateioperationen aus.</p>
+-            <pre>python3 embycache_run.py</pre>
+-
+-            <h3>Modus: Real (Scharf)</h3>
+-            <p>Führt die Aktionen wirklich durch (rsync & mover) und aktualisiert die <code>embycache_exclude.txt</code>.</p>
+-            <pre>python3 embycache_run.py --run</pre>
+-
+-        </div>
+-    </details>
+-
+-    <details class="main-section" id="faq">
+-        <summary><h2>6. FAQ & Troubleshooting</h2></summary>
+-        <div class="section-content">
+-            <div class="emergency-box">
+-                <div class="emergency-header">
+-                    <span>⚠️ Wichtiger Hinweis zum Mover</span>
+-                </div>
+-                <p>Das Skript nutzt den Unraid Mover für den Cleanup (Cache -> Array). Damit das funktioniert, muss die Datei <code>embycache_exclude.txt</code> korrekt geschrieben werden. Tools wie das "Mover Tuning Plugin" können diese Liste nutzen, um geschützte Dateien auf dem Cache zu ignorieren.</p>
+-            </div>
+-
+-            <h3>Warum werden meine Filme nicht verschoben?</h3>
+-            <p>Prüfe das <strong>Path Mapping</strong> in der <code>embycache_settings.json</code>. Wenn der Docker-Pfad (Emby) nicht in einen gültigen Unraid-Pfad übersetzt werden kann, ignoriert das Skript die Datei sicherheitshalber.</p>
+-
+-            <h3>Wird mein laufender Film unterbrochen?</h3>
+-            <p><strong>Nein.</strong> Die Active-Protection-Logik erkennt laufende Streams und überspringt diese Dateien bei jeglichen Verschiebe-Aktionen.</p>
+-
+-            <h3>Wo finde ich Logs?</h3>
+-            <p>Ausführliche Logs (mit kompletten Pfaden) liegen in <code>logs/embycache.log</code>. Die Konsolenausgabe ist bewusst minimal gehalten.</p>
+-        </div>
+-    </details>
+-
+-    <details class="main-section" id="structure">
+-        <summary><h2>7. Dateistruktur</h2></summary>
+-        <div class="section-content">
+-            <p>Die folgenden Dateien befinden sich im Skript-Verzeichnis:</p>
+-            <ul>
+-                <li><code>embycache_setup.py</code>: Der Konfigurations-Wizard.</li>
+-                <li><code>embycache_run.py</code>: Das Hauptskript.</li>
+-                <li><code>embycache_settings.json</code>: Speichert Server, User und Limits.</li>
+-                <li><code>embycache_exclude.txt</code>: Liste der Dateien, die aktuell auf dem Cache liegen (wird vom Mover-Tuning Plugin genutzt, um diese Dateien NICHT zu verschieben).</li>
+-                <li><code>logs/</code>: Ordner für Rotierende Logs (Max 20 Dateien à 10MB).</li>
+-            </ul>
+-        </div>
+-    </details>
+-
+-    <footer style="margin-top: 60px; text-align: center; color: #666; font-size: 0.8em; border-top: 1px solid #333; padding-top: 20px;">
+-        EmbyCache | Version 6.0 Multi-Instance
+-    </footer>
+-
+-</body>
+-</html>
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index 7e3593c..82541c7 100644
+--- a/README.md
++++ b/README.md
+@@ -1,181 +1,136 @@
+-# 🎬 EmbyCache v6.0 Multi-Server
++# 🎬 EmbyCache für Unraid
+ 
+-Intelligentes Caching-System für Unraid: Verschiebt Medien basierend auf Nutzerverhalten von Emby auf die SSD.
++Verschiebt die Medien, die Emby-Benutzer als Nächstes sehen werden («Weiterschauen», die nächsten Folgen, Favoriten-Serien), vom Array auf den Cache-Pool und räumt sie wieder aufs Array, sobald sie nicht mehr gebraucht werden. Die Array-Platten können dadurch schlafen, und die Wiedergabe startet ohne Spin-up.
+ 
+-🌐Multi-Server Unterstützt mehrere Emby-Instanzen gleichzeitig. Benutzer und Pfade werden pro Server getrennt verwaltet.
++Emby merkt davon nichts, weil es die Medien über `/mnt/user/...` sieht – egal ob eine Datei gerade auf dem Pool oder auf einer Array-Disk liegt.
+ 
+-🧹Smart Cleanup **Zuerst aufräumen:** Alte Dateien werden erst zurück aufs Array verschoben, um Platz für neue On-Deck Inhalte zu schaffen.
++## Was das Script macht
+ 
+-🍿Binge-Ready Erkennt Serien automatisch. Lädt nicht nur die aktuelle, sondern auch die nächsten X Episoden vor.
+-
+-🛑Active Protection Prüft live via API, ob eine Datei abgespielt wird. Verhindert Verschieben/Löschen während der Wiedergabe.
+-
+-👤Granulare Kontrolle Limits (Anzahl Filme/Episoden) können pro Benutzer und pro Bibliothek individuell eingestellt werden.
+-
+-🗺️Path Mapping Übersetzt Docker-Pfade (`/media/...`) zuverlässig in Unraid Host-Pfade (`/mnt/user/...`).
+-
+-👀On-Deck Report Der Schalter `--show-on-deck` zeigt exakt an, was geplant ist, ohne eine einzige Datei zu bewegen.
+-
+-📂Auto-Detection Erkennt automatisch Bibliotheks-Typen (Filme vs. Serien) und schlägt passende Einstellungen vor.
+-
+-Inhaltsverzeichnis
+-
+-*   [1\. Installation & Setup](#installation)
+-*   [2\. Die Script-Dateien](#files)
+-*   [3\. JSON Struktur & Config](#structure)
+-*   [4\. Logik & Ablauf](#workflow)
+-*   [5\. Befehle & Ausführung](#commands)
+-*   [6\. FAQ & Troubleshooting](#faq)
+-
+-## <a id="installation"></a>1\. Installation & Setup
+-
+-*   Schritt 1: Vorbereitung Stelle sicher, dass Python 3 und die Library `requests` auf deinem Unraid Server installiert sind.  
+-    `pip install requests`
+-*   Schritt 2: Dateien kopieren Erstelle einen Ordner (z.B. `/mnt/user/system/scripts/embycache`) und kopiere `embycache_setup.py` und `embycache_run.py` hinein.
+-*   Schritt 3: Setup Wizard starten Führe den Konfigurator aus:  
+-    `python3 embycache_setup.py`  
+-    Folge den Anweisungen, um Server, API-Keys und Pfade zu definieren.
+-*   Schritt 4: Testlauf Prüfe die Konfiguration mit dem Report-Modus:  
+-    `python3 embycache_run.py --show-on-deck`
+-
+-## <a id="files"></a>2\. Die Script-Dateien
+-
+-🧙‍♂️
+-
+-embycache_setup.py Wizard Interaktiver Konfigurator. Liest Server-Daten, erstellt/updatet die JSON und erkennt Bibliotheken.
+-
+-⚙️
+-
+-embycache_run.py Core Das Hauptskript. Berechnet On-Deck, schützt aktive Streams, verschiebt Dateien (rsync/mover).
+-
+-📄
+-
+-embycache_settings.json Speichert die gesamte Konfiguration (Server, User, Limits, Pfade) in hierarchischer Struktur.
+-
+-## <a id="structure"></a>3\. JSON Struktur & Config
+-
+-Die `embycache_settings.json` ist das Herzstück. Hier ein detailliertes Beispiel mit 2 Servern, 2 Usern und unterschiedlichen Bibliothekstypen.
+-```
++| Phase | Aktion | Beschreibung |
++| --- | --- | --- |
++| 1. Schutz | Sessions | Fragt alle Instanzen, was **gerade läuft**. Diese Dateien werden nie verschoben. |
++| 2. Analyse | On-Deck | Pro Benutzer: «Weiterschauen»-Einträge, bei Serien die nächsten Folgen **in Serienreihenfolge** (nach der aktuellen Folge), plus die nächsten ungesehenen Folgen von Favoriten-Serien. Umfang nach Zähler (`number_episodes`) oder nach **Budget** (`cache_budget`, siehe unten). |
++| 3. Cleanup | Cache → Array | Dateien aus der letzten Exclude-Liste, die nicht mehr on deck sind, gehen über das Unraid-`move`-Binary zurück aufs Array. **Zuerst**, damit Platz frei wird. |
++| 4. Befüllen | Array → Cache | On-Deck-Dateien kommen auf den Pool – per `rsync -aAX --numeric-ids /mnt/user0/… /mnt/<pool>/…` **exakt wie im Original**, Quelle erst gelöscht, wenn rsync mit 0 endet und die Grösse stimmt (`fill_tool: rsync`, Default). Optional liest rsync vom echten `/mnt/diskN`-Pfad (`array_source: disk`) oder die Array-Pfade gehen ans Unraid-`move`-Binary wie beim Stock-Mover für «prefer»-Shares (`fill_tool: mover`). Vorher wird der Freiplatz geprüft. |
++| 5. Exclude-Liste | `embycache_exclude.txt` | Alle On-Deck-Dateien, die jetzt auf dem Cache liegen – für Mover Tuning («File list path»), damit der reguläre Mover sie in Ruhe lässt. |
++
++Ist Emby nicht (vollständig) erreichbar, wird der Cleanup übersprungen und die alte Exclude-Liste bleibt geschützt – sonst würde ein kurzer Emby-Neustart den ganzen Cache leeren.
++
++## Installation
++
++1. Python 3 auf Unraid (z.B. Plugin «Python 3 for UNRAID»). Weitere Pakete braucht es **nicht** – die Scripte nutzen nur die Standardbibliothek.
++2. Ordner anlegen, z.B. `/mnt/user/system/scripts/embycache`, und `embycache_lib.py`, `embycache_run.py`, `embycache_setup.py`, `embycache_cleaner.py` hineinkopieren.
++3. Wizard ausführen: `python3 embycache_setup.py`
++4. Prüfen: `python3 embycache_run.py --show-on-deck` (Report) und `python3 embycache_run.py` (Dry-Run)
++5. Scharf schalten, z.B. als User Script stündlich:
++   ```
++   #!/bin/bash
++   cd /mnt/user/system/scripts/embycache && python3 embycache_run.py --run
++   ```
++
++## Dateien
++
++| Datei | Zweck |
++| --- | --- |
++| `embycache_setup.py` | Interaktiver Konfigurator: Instanzen, Bibliotheken, Pfad-Mapping, Benutzer, Systemwerte |
++| `embycache_run.py` | Hauptscript (Report / Dry-Run / Run) |
++| `embycache_cleaner.py` | Findet Dateien auf dem Cache, die nicht in der Exclude-Liste stehen (Waisen), und räumt sie auf Wunsch weg |
++| `embycache_lib.py` | Gemeinsamer Code (Config, Pfade, Emby-API, Mover, Lock, Logging) |
++| `embycache_settings.json` | Konfiguration (siehe unten) |
++| `embycache_exclude.txt` | Aktuell gecachte Dateien; wird atomar geschrieben |
++| `embycache.lock` | Verhindert parallele Läufe |
++| `logs/` | Rotierende Logs (10 MB × 20) |
++
++Alle Pfade sind relativ zum **Script-Verzeichnis**, nicht zum Arbeitsverzeichnis – das Script läuft also auch aus cron/User Scripts ohne `cd`. Mit `EMBYCACHE_DIR` lässt sich das Arbeitsverzeichnis trotzdem umbiegen.
++
++## Konfiguration (`embycache_settings.json`)
++
++```jsonc
+ {
+-    // Globale Pfade für Unraid
+-    "cache_path": "/mnt/cache",
+-    "user_path": "/mnt/user",
+-    "array_path": "/mnt/user0",
+-    "min_free_percent": 40,
++    "cache_path": "/mnt/cache",            // Pool, auf den gecacht wird (z.B. /mnt/master)
++    "array_path": "/mnt/user0",            // Array-Sicht ohne Pools
++    "user_path": "/mnt/user",              // Sicht, die Emby gemountet hat
++    "array_disks_glob": "/mnt/disk[0-9]*", // echte Array-Disks (nur für array_source: disk)
++    "array_source": "user0",               // rsync-Quelle: user0 = wie das Original, disk = /mnt/diskN (am FUSE vorbei)
+ 
+-    // Liste der Emby-Instanzen
+     "instances": [
+         {
+-            "servername": "HomeServer",
+-            "url": "http://192.168.1.10:8096",
+-            "api_key": "api_key_home_server_123",
+-            "path_mappings": {
+-                "/media/Filme": "/mnt/user/Filme",
++            "servername": "Nostromo",
++            "url": "http://192.168.7.10:8096",
++            "api_key": "…",
++            "path_mappings": {                 // Docker-Pfad -> Host-Pfad, nur gecachte Bibliotheken
++                "/media/Filme":  "/mnt/user/Filme",
+                 "/media/Serien": "/mnt/user/Serien"
+             }
+-        },
+-        {
+-            "servername": "Ferienhaus",
+-            "url": "http://192.168.1.20:8096",
+-            "api_key": "api_key_remote_server_456",
+-            "path_mappings": {
+-                "/data/Movies": "/mnt/user/Movies",
+-                "/data/TV": "/mnt/user/TV"
+-            }
+         }
+     ],
+-
+-    // Konfigurierte Benutzer (Key ist die Emby User ID)
+-    "valid_users": {
+-        // User 1 auf dem Hauptserver (Mixed Content)
+-        "a1b2c3d4e5f6...": {
+-            "username": "Papa",
+-            "on_server": "HomeServer",
+-            "libraries": {
+-                "Action Filme": {
+-                    "libraries_type": "movies",
+-                    "max_use_count_on_deck": 5
+-                },
+-                "Serien Highlights": {
+-                    "libraries_type": "serien",
+-                    "max_use_count_on_deck": 10,
+-                    "number_episodes": 3
+-                }
+-            }
+-        },
+-        // User 2 auf dem Remote Server (Nur Serien)
+-        "9876543210ab...": {
+-            "username": "Kids",
+-            "on_server": "Ferienhaus",
+-            "libraries": {
+-                "Cartoons": {
+-                    "libraries_type": "serien",
+-                    "max_use_count_on_deck": 20,  // Mehr Auswahl für Kinder
+-                    "number_episodes": 5   // Binge-Faktor hoch
+-                }
+-            }
+-        }
+-    }
++    "path_mappings": {},                   // optional: globales Mapping für alle Instanzen
++
++    "valid_users": [],                     // User-IDs; leer = alle Benutzer (auch Dict {id: {...}} wird akzeptiert)
++    "number_episodes": 3,                  // Zähl-Modus: Folgen nach der aktuellen vorladen
++    "cache_budget": "",                    // Budget-Modus: z.B. "2.5T" – leer = Zähl-Modus
++    "movie_share_percent": 50,             // Budget-Modus: Anteil Filme am Benutzer-Budget (weich, nach Bytes)
++    "max_episodes_per_series": 0,          // Budget-Modus: Folgen pro Serie höchstens (0 = das Budget entscheidet)
++    "max_resume_items": 10,                // Weiterschauen-Einträge pro Benutzer
++    "max_favorite_series": 10,             // Favoriten-Serien pro Benutzer (0 = aus)
++    "min_free_percent": 20,                // darunter wird nichts mehr kopiert (ZFS: nicht unter 15–20 gehen)
++    "movie_mode": "folder",                // folder = ganzer Filmordner, file = nur gleichnamige Dateien
++    "create_share_root": false,            // Share-Wurzel auf dem Pool automatisch anlegen (siehe ZFS-Hinweis)
++    "mover_bin": "",                       // leer = /usr/libexec/unraid/move bzw. /usr/local/sbin/move
++    "mover_debug_level": 0,                // -d für das move-Binary (1 = Dateien loggen)
++    "rsync_args": ["-aAX", "--numeric-ids"], // vollständige rsync-Optionen, Default = Original
++    "fill_tool": "rsync",                  // Array -> Cache: rsync oder mover (Unraid move-Binary, siehe Hinweise)
++    "api_timeout": 10
+ }
+ ```
+ 
+-## <a id="workflow"></a>4\. Logik & Ablauf
+-
+-Das Skript arbeitet strikt sequenziell, um Datenverlust oder volle Caches zu vermeiden.
+-
+-| Phase | Aktion | Beschreibung |
+-| --- | --- | --- |
+-| **1\.&nbsp;Analyse** | Daten&nbsp;sammeln | Liest für jeden User "Weiterschauen" aus. Berechnet bei Serien zusätzlich die nächsten X Episoden und erstellt eine Liste aller benötigten Dateien (On-Deck). |
+-| **2\.&nbsp;Schutz** | Session&nbsp;Check | Fragt alle Server ab: Welche Datei wird **jetzt gerade** abgespielt? Diese Pfade landen auf einer internen Blacklist für Verschiebungen. |
+-| **3\.&nbsp;Cleanup** | Cache&nbsp;-> Array | Dateien, die NICHT mehr auf der neuen On-Deck-Liste stehen (und nicht abgespielt werden), werden vom Cache auf das Array verschoben.  <br>_Ziel: Platz schaffen._ |
+-| **4\.&nbsp;Move** | Array&nbsp;-> Cache | Die neuen On-Deck-Dateien werden vom Array auf den Cache kopiert (rsync).  <br>_Ziel: Performance._ |
+-
+-## <a id="commands"></a>5\. Befehle & Ausführung
+-
+-### Modus: Report (Nur schauen)
+-
+-Zeigt an, was das Skript tun würde und welche Medien als "On Deck" erkannt werden. Ideal zur Fehlersuche.
+-
+-`python3 embycache_run.py --show-on-deck`
++### Budget-Modus
+ 
+-### Modus: Dry-Run (Simulation)
++Zähler wissen nichts über Dateigrössen: drei Folgen einer SD-Serie sind 1 GB, drei Remux-Folgen 30 GB. Mit `cache_budget` (z.B. `"2.5T"`) rechnet das Script in Bytes:
+ 
+-Standardmodus beim Aufruf ohne Argumente. Berechnet alle Verschiebungen und zeigt Statistiken, führt aber keine Dateioperationen aus.
++* Das Budget wird **fair auf die aktiven Benutzer** verteilt (Benutzer ohne «Weiterschauen»/Favoriten zählen nicht). Was ein Benutzer nicht braucht, fliesst automatisch an die anderen (Water-Filling). Einzelnen Benutzern lässt sich ein festes Budget geben: `"valid_users": {"<id>": {"budget": "300G"}, "<id2>": {}}`.
++* Innerhalb des Benutzer-Budgets werden **Filme und Serien nach Bytes** im Verhältnis `movie_share_percent` gefüllt – weich: ist eine Kategorie leer, bekommt die andere den Rest. Filme in der Reihenfolge der Weiterschauen-Liste (neueste zuerst).
++* Serien werden **reihum** gefüllt: jede laufende Serie und jeder Favorit bekommt pro Runde eine Folge. Kleine Folgen ergeben so automatisch viele Stück, grosse wenige, und keine Serie kann das ganze Budget belegen. `max_episodes_per_series` deckelt zusätzlich (0 = nur das Budget entscheidet).
++* Passt ein Eintrag nicht mehr, wird seine Serie gestoppt (nie Folge 5 ohne Folge 4); ein zu grosser Film wird übersprungen, der nächste probiert.
++* Was nicht ins Budget passt, bleibt auf dem Array bzw. wird beim nächsten Lauf zurückgeräumt. Das Log zeigt pro Benutzer `Budget <Name>: belegt von zugeteilt (Filme …, Serien …) – nicht im Budget: …`.
+ 
+-`python3 embycache_run.py`
++Das Budget bezieht sich auf den Inhalt der Exclude-Liste, also auf das, was das Script auf dem Pool hält. `min_free_percent` und eine ZFS-Quota bleiben die harte Grenze darunter.
+ 
+-### Modus: Real (Scharf)
++Filme: Liegt der Film in einem eigenen Ordner, wird der ganze Ordner mitgenommen (Untertitel, nfo, Extras). Liegt er direkt im Bibliotheksordner (flache Ablage), werden nur die Dateien mit gleichem Basisnamen genommen – die Bibliothek wird nie als Ganzes verschoben. Ordner-Items (DVD/BluRay-Struktur) werden als Ordner behandelt.
+ 
+-Führt die Aktionen wirklich durch (rsync & mover) und aktualisiert die `embycache_exclude.txt`.
++## Befehle
+ 
+-`python3 embycache_run.py --run`
++| Befehl | Wirkung |
++| --- | --- |
++| `python3 embycache_run.py --show-on-deck` | Report: On-Deck-Liste mit Speicherort (CACHE/ARRAY), Grösse und Grund |
++| `python3 embycache_run.py` | Dry-Run: alle geplanten Aktionen, keine Dateioperationen |
++| `python3 embycache_run.py --run` | Scharf |
++| `python3 embycache_cleaner.py` | Waisen auf dem Cache anzeigen |
++| `python3 embycache_cleaner.py --run` | Waisen aufs Array verschieben |
++| `python3 embycache_cleaner.py --add-to-list` | Waisen in die Exclude-Liste aufnehmen |
+ 
+-## <a id="faq"></a>6\. FAQ & Troubleshooting
++Umgebungsvariablen: `EMBYCACHE_MODE` (dry / report / run), `EMBYCACHE_DIR`, `EMBYCACHE_CONFIG`, `EMBYCACHE_LOG_LEVEL`, `EMBYCACHE_MIN_FREE_PERCENT`, `EMBYCACHE_MOVER_DEBUG`, `EMBYCACHE_RSYNC_ARGS`, `EMBYCACHE_FILL_TOOL`, `EMBYCACHE_CACHE_BUDGET`. Der Hilfetext im Kopf jedes Scripts beschreibt sie.
+ 
+-⚠️ Wichtiger Hinweis zum Mover
++## Worauf du auf Unraid achten musst
+ 
+-Das Skript nutzt den Unraid Mover für den Cleanup (Cache -> Array). Damit das funktioniert, muss die Datei `embycache_exclude.txt` korrekt geschrieben werden. Tools wie das "Mover Tuning Plugin" können diese Liste nutzen, um geschützte Dateien auf dem Cache zu ignorieren.
++**Share-Einstellung der Medien-Shares.** Steht der Share auf *Primary: Cache, Secondary: Array, Mover: Cache → Array* (alt: «Cache: Yes»), schiebt der reguläre Mover die gecachten Dateien nachts wieder zurück. Dann brauchst du **Mover Tuning** mit der Option «File list path» auf `embycache_exclude.txt`. Steht der Share auf *Array only*, fasst der reguläre Mover ihn gar nicht an und die Exclude-Liste ist nur für den Cleanup des Scripts nötig – vorher aber mit einer Datei testen, dass das `move`-Binary den Pool-Pfad trotzdem aufs Array schiebt (`mover_debug_level: 1`).
+ 
+-### Warum werden meine Filme nicht verschoben?
++**ZFS-Pool als Cache.** Ein Share-Ordner, der per `mkdir` auf dem Pool entsteht, ist ein normales Verzeichnis, kein Dataset. Datasets legt Unraid nur über die User-Share-Mechanik an. Lege die Share-Wurzeln deshalb vorher an (`zfs create pool/Filme`), das Script bricht sonst mit einem Hinweis ab (`create_share_root` bleibt bewusst `false`). Eine `zfs set quota=…` auf diese Datasets ist die harte Grenze gegen einen vollen Pool – zusätzlich zu `min_free_percent`, das bei einem Dataset mit Quota gegen die Quota rechnet.
+ 
+-Prüfe das **Path Mapping** in der `embycache_settings.json`. Wenn der Docker-Pfad (Emby) nicht in einen gültigen Unraid-Pfad übersetzt werden kann, ignoriert das Skript die Datei sicherheitshalber.
++**Kopieren und Mover wie im Original.** Mit den Defaults sind die beiden Aufrufe identisch mit der seit über einem Jahr produktiven Version: `rsync -aAX --numeric-ids /mnt/user0/<Datei> /mnt/<pool>/<Datei>` pro Datei, danach `unlink` der Quelle; Cache → Array über `/usr/libexec/unraid/move` (sonst `/usr/local/sbin/move`, `/usr/local/bin/move`) mit den Cache-Pfaden zeilenweise auf stdin, ohne `-d`, solange `mover_debug_level` 0 ist. Neu ist nur, was *nach* dem Aufruf passiert: Exit-Code und stderr werden geloggt, die Grösse wird vor dem Löschen verglichen, und nach dem Mover wird geprüft, was noch auf dem Cache liegt. `EMBYCACHE_LOG_LEVEL=DEBUG` zeigt jeden Aufruf wörtlich.
+ 
+-### Wird mein laufender Film unterbrochen?
++**Array → Cache über den Unraid-Mover (`fill_tool: mover`).** Der Stock-Mover bringt Dateien von «prefer»-Shares mit `find /mnt/user0/<share> | move` auf den Pool; das Script übergibt dem Binary dieselben Pfade (bevorzugt den echten `/mnt/diskN`-Pfad). Welchen Pool das Binary nimmt, steht in der Share-Konfiguration – für einen Share auf *Array only* gibt es keinen, dann bleibt die Datei liegen und das Script meldet es. Deshalb: mit `mover_debug_level: 1` und einer einzelnen Datei testen, bevor du umstellst. Vorteil gegenüber rsync: fuser-Check und keine doppelte Datei bei Abbruch; der Cleanup (Cache → Array) läuft immer über das Binary.
+ 
+-**Nein.** Die Active-Protection-Logik erkennt laufende Streams und überspringt diese Dateien bei jeglichen Verschiebe-Aktionen.
++**Emby-Mounts.** Emby muss die Medien über `/mnt/user/...` sehen (nicht `/mnt/user0` oder `/mnt/diskN`), sonst bricht der transparente Wechsel zwischen Pool und Array.
+ 
+-### Wo finde ich Logs?
++**Hardlinks.** Sind Medien per Hardlink mit einem Download-Ordner verbunden (*arr-Setups), trennt rsync + löschen den Hardlink; nach dem Zurückschieben liegt die Datei doppelt.
+ 
+-Ausführliche Logs (mit kompletten Pfaden) liegen in `logs/embycache.log`. Die Konsolenausgabe ist bewusst minimal gehalten.
++**Duplikate.** Bricht ein Kopiervorgang ab, bleibt die Quelle auf dem Array und rsync räumt seine Temp-Datei weg. Bleibt trotzdem einmal eine Datei doppelt liegen (z.B. Löschen fehlgeschlagen), steht es als ERROR im Log; `embycache_cleaner.py` findet solche Dateien.
+ 
+-## 7\. Dateistruktur
++## FAQ
+ 
+-Die folgenden Dateien befinden sich im Skript-Verzeichnis:
++**Warum passiert nichts?** Meist fehlt das Path-Mapping: Ohne Übersetzung des Docker-Pfads wird ein Item mit WARNING übersprungen (`--show-on-deck` zeigt es). Prüfe auch `valid_users` – leer heisst alle.
+ 
+-*   `embycache_setup.py`: Der Konfigurations-Wizard.
+-*   `embycache_run.py`: Das Hauptskript.
+-*   `embycache_settings.json`: Speichert Server, User und Limits.
+-*   `embycache_exclude.txt`: Liste der Dateien, die aktuell auf dem Cache liegen (wird vom Mover-Tuning Plugin genutzt, um diese Dateien NICHT zu verschieben).
+-*   `logs/`: Ordner für Rotierende Logs (Max 20 Dateien à 10MB).
++**Wird mein laufender Film unterbrochen?** Nein. Laufende Wiedergaben werden über `/Sessions` erkannt und weder kopiert noch zurückgeschoben. Wenn Sessions nicht abrufbar sind, wird nichts vom Cache entfernt.
+ 
+-EmbyCache | Version 6.0 Multi-Instance
++**Wo sind die Logs?** `logs/embycache.log` und `logs/embycache_cleaner.log`, mit vollständigen Pfaden. `EMBYCACHE_LOG_LEVEL=DEBUG` zeigt zusätzlich die Mover-Aufrufe.
+diff --git a/embycache_cleaner.py b/embycache_cleaner.py
+index 769a576..3d5cc82 100644
+--- a/embycache_cleaner.py
++++ b/embycache_cleaner.py
+@@ -1,145 +1,113 @@
+ #!/usr/bin/env python3
+-import os, sys, json, logging, subprocess, argparse
++"""
++EmbyCache Cleaner – findet Dateien auf dem Cache in den gecachten Bibliotheksordnern, die NICHT in der
++Exclude-Liste stehen (Waisen: z.B. nach einem abgebrochenen Lauf oder manuell kopiert), und schiebt sie
++auf Wunsch per Unraid move-Binary aufs Array oder nimmt sie in die Exclude-Liste auf.
++
++Aufruf:
++  python3 embycache_cleaner.py                Dry-Run: listet die Waisen
++  python3 embycache_cleaner.py --run          Waisen aufs Array verschieben (move-Binary)
++  python3 embycache_cleaner.py --add-to-list  Waisen in die Exclude-Liste aufnehmen (bleiben auf dem Cache)
++
++Umgebungsvariablen: EMBYCACHE_DIR, EMBYCACHE_CONFIG, EMBYCACHE_LOG_LEVEL, EMBYCACHE_MOVER_DEBUG (siehe embycache_lib.py)
++Gerade abgespielte Dateien werden nie verschoben.
++"""
++import argparse
++import sys
+ from pathlib import Path
+ 
+-# Logging Setup
+-LOG_DIR = Path("logs"); LOG_DIR.mkdir(exist_ok=True)
+-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s",
+-    handlers=[logging.FileHandler(LOG_DIR / "embycache_cleaner.log", encoding="utf-8"), logging.StreamHandler(sys.stdout)])
+-log = logging.getLogger("EmbyCleaner")
+-
+-class EmbyCacheCleaner:
+-    def __init__(self, mode):
+-        self.mode = mode  # 'dry', 'run', 'add'
+-        self.config = self.load_config()
+-        self.exclude_file = Path("embycache_exclude.txt")
+-        self.exclude_list = self.load_exclude_list()
+-        self.mover_bin = self.detect_mover_bin()
+-
+-    def load_config(self):
+-        p = Path("embycache_settings.json")
+-        if not p.exists():
+-            log.error("Config fehlt! Bitte erst embycache_setup.py ausführen.")
+-            sys.exit(1)
+-        return json.loads(p.read_text(encoding="utf-8"))
+-
+-    def load_exclude_list(self):
+-        if not self.exclude_file.exists(): return set()
+-        try:
+-            lines = self.exclude_file.read_text(encoding="utf-8").splitlines()
+-            return set(line.strip() for line in lines if line.strip())
+-        except: return set()
+-
+-    def detect_mover_bin(self):
+-        # Unraid 7 vs 6 Check
+-        if os.path.exists("/usr/libexec/unraid/move"):
+-            return "/usr/libexec/unraid/move"
+-        return "/usr/local/bin/move"
+-
+-    def scan_cache_for_orphans(self):
+-        """Durchsucht den Cache nach Dateien, die NICHT in der Exclude-Liste stehen."""
+-        cache_root = Path(self.config["cache_path"])
+-        user_root = Path(self.config.get("user_path", "/mnt/user")) # Fallback wenn nicht in Config
+-        
+-        orphans = []
+-        
+-        # Wir scannen nur die Ordner, die auch in den Path-Mappings definiert sind
+-        # um nicht versehentlich System-Shares (appdata, domains) zu scannen.
+-        scan_targets = set()
+-        for _, host_path in self.config.get("path_mappings", {}).items():
+-            if str(user_root) in host_path:
+-                # Aus /mnt/user/Serien wird /mnt/cache/Serien
+-                rel_path = host_path.replace(str(user_root), "").strip("/")
+-                target = cache_root / rel_path
+-                scan_targets.add(target)
+-
+-        log.info(f"Scanne {len(scan_targets)} Ordner auf dem Cache...")
+-
+-        for folder in scan_targets:
+-            if not folder.exists(): continue
+-            
+-            for root, dirs, files in os.walk(folder):
+-                for file in files:
+-                    file_path = Path(root) / file
+-                    
+-                    # Ignoriere unsere eigenen Config-Dateien, falls sie auf dem Cache liegen
+-                    if "embycache_" in file: continue
+-
+-                    # Check: Ist die Datei in der Exclude Liste?
+-                    if str(file_path) not in self.exclude_list:
+-                        orphans.append(str(file_path))
+-
+-        return orphans
+-
+-    def execute_unraid_mover(self, file_list):
+-        """Pusht die Liste an den Unraid Mover."""
+-        if not file_list: return
+-        
+-        paths_str = "\n".join(file_list) + "\n"
+-        try:
+-            log.info(f"Starte Mover für {len(file_list)} Dateien...")
+-            process = subprocess.Popen(
+-                [self.mover_bin, "-d", "1"],  # Logging aktiviert
+-                stdin=subprocess.PIPE,
+-                stdout=subprocess.PIPE,
+-                stderr=subprocess.PIPE,
+-                text=True
+-            )
+-            stdout, stderr = process.communicate(input=paths_str)
+-            
+-            if process.returncode != 0:
+-                log.error(f"Mover Fehler: {stderr}")
+-            else:
+-                log.info("Mover erfolgreich ausgeführt.")
+-        except Exception as e:
+-            log.error(f"Fehler beim Mover-Aufruf: {e}")
+-
+-    def update_exclude_list(self, new_files):
+-        """Fügt die gefundenen Dateien zur Exclude-Liste hinzu."""
+-        try:
+-            with open(self.exclude_file, "a", encoding="utf-8") as f:
+-                for path in new_files:
+-                    f.write(f"{path}\n")
+-            log.info(f"{len(new_files)} Dateien zur Exclude-Liste hinzugefügt.")
+-        except Exception as e:
+-            log.error(f"Fehler beim Schreiben der Exclude-Liste: {e}")
+-
+-    def run(self):
+-        orphans = self.scan_cache_for_orphans()
+-        
++from embycache_lib import (
++    ConfigError, Locations, acquire_lock, collect_sessions, detect_mover_bin, human, is_playing, load_config,
++    read_exclude, remove_empty_parents, run_mover, setup_logging, write_exclude,
++)
++
++log = setup_logging("EmbyCleaner", "embycache_cleaner.log")
++
++
++def scan_orphans(cfg, exclude, sessions):
++    """Alle Dateien unter <cache>/<Bibliotheks-Wurzel>, die weder in der Exclude-Liste stehen noch laufen."""
++    roots = set()
++    for inst in cfg["instances"]:
++        loc = Locations(cfg, inst["_mappings"])
++        roots.update(loc.library_roots)
++    cache = Path(cfg["cache_path"])
++    orphans, playing = [], []
++    log.info(f"Scanne {len(roots)} Bibliotheksordner auf {cache}: {', '.join(map(str, sorted(roots)))}")
++    for rel_root in sorted(roots):
++        base = cache / rel_root
++        if not base.is_dir():
++            continue
++        for f in base.rglob("*"):
++            if not f.is_file() or f.name.startswith("embycache_"):
++                continue
++            if str(f) in exclude:
++                continue
++            if is_playing(f.relative_to(cache), sessions):
++                playing.append(f)
++                continue
++            orphans.append(f)
++    return orphans, playing
++
++
++def main():
++    parser = argparse.ArgumentParser(description="EmbyCache Cleaner")
++    group = parser.add_mutually_exclusive_group()
++    group.add_argument("--run", action="store_true", help="Waisen aufs Array verschieben")
++    group.add_argument("--add-to-list", action="store_true", help="Waisen in die Exclude-Liste aufnehmen")
++    args = parser.parse_args()
++    mode = "run" if args.run else "add" if args.add_to_list else "dry"
++
++    try:
++        cfg = load_config()
++    except ConfigError as e:
++        log.error(str(e))
++        return 1
++    lock = acquire_lock(log)
++    if lock is None:
++        return 1
++    try:
++        exclude = read_exclude()
++        sessions, sessions_ok = collect_sessions(cfg, log)
++        if not sessions_ok and mode == "run":
++            log.error("Sessions nicht von allen Instanzen abrufbar – ohne Wissen über laufende Streams wird nichts verschoben")
++            return 1
++        orphans, playing = scan_orphans(cfg, exclude, sessions)
++        for f in playing:
++            log.info(f"[BLEIBT: läuft gerade] {f}")
+         if not orphans:
+-            log.info("Keine unbekannten Dateien auf dem Cache gefunden. Alles sauber.")
+-            return
+-
+-        total_size = sum(os.path.getsize(f) for f in orphans) / (1024*1024*1024)
+-        log.info(f"Gefunden: {len(orphans)} Dateien ({total_size:.2f} GB) die NICHT in der Exclude-Liste sind.")
++            log.info("Keine unbekannten Dateien auf dem Cache. Alles sauber.")
++            return 0
++        total = sum(f.stat().st_size for f in orphans)
++        log.info(f"Gefunden: {len(orphans)} Dateien ({human(total)}), die nicht in der Exclude-Liste stehen")
+ 
+-        if self.mode == 'dry':
+-            print("\n--- GEFUNDENE DATEIEN (DRY RUN) ---")
++        if mode == "dry":
+             for f in orphans:
+-                print(f"[UNBEKANNT] {f}")
+-            print("-" * 60)
+-            print("Benutze --run um diese Dateien auf das Array zu verschieben.")
+-            print("Benutze --add-to-list um diese Dateien in der Exclude-Liste zu behalten.")
+-
+-        elif self.mode == 'run':
+-            log.info("Verschiebe Dateien auf das Array (Mover)...")
+-            self.execute_unraid_mover(orphans)
++                print(f"[UNBEKANNT] {human(f.stat().st_size):>10}  {f}")
++            print("\n--run           verschiebt diese Dateien aufs Array")
++            print("--add-to-list   behält sie auf dem Cache und schützt sie in der Exclude-Liste")
++        elif mode == "add":
++            write_exclude(exclude | {str(f) for f in orphans})
++            log.info(f"{len(orphans)} Dateien zur Exclude-Liste hinzugefügt")
++        else:
++            mover = detect_mover_bin(cfg)
++            if not mover:
++                log.error("Kein Unraid move-Binary gefunden (mover_bin in der Config setzen)")
++                return 1
++            run_mover(mover, [str(f) for f in orphans], cfg["mover_debug_level"], log)
++            left = [f for f in orphans if f.exists()]
++            for f in left:
++                log.warning(f"Noch auf dem Cache: {f}")
++            for f in orphans:
++                if not f.exists():
++                    remove_empty_parents(f.parent, Path(cfg["cache_path"]), log)
++            log.info(f"Verschoben: {len(orphans) - len(left)} von {len(orphans)} Dateien")
++        return 0
++    except Exception:
++        log.exception("Unerwarteter Fehler")
++        return 1
++    finally:
++        lock.close()
+ 
+-        elif self.mode == 'add':
+-            log.info("Füge Dateien zur Exclude-Liste hinzu...")
+-            self.update_exclude_list(orphans)
+ 
+ if __name__ == "__main__":
+-    parser = argparse.ArgumentParser(description="EmbyCache Cleaner")
+-    group = parser.add_mutually_exclusive_group()
+-    group.add_argument("--run", action="store_true", help="Verschiebt gefundene Dateien aufs Array")
+-    group.add_argument("--add-to-list", action="store_true", help="Fügt gefundene Dateien zur Exclude Liste hinzu")
+-    
+-    args = parser.parse_args()
+-    
+-    mode = 'dry'
+-    if args.run: mode = 'run'
+-    if args.add_to_list: mode = 'add'
+-
+-    EmbyCacheCleaner(mode).run()
+\ No newline at end of file
++    sys.exit(main())
+diff --git a/embycache_lib.py b/embycache_lib.py
+new file mode 100644
+index 0000000..c2ffb73
+--- /dev/null
++++ b/embycache_lib.py
+@@ -0,0 +1,432 @@
++#!/usr/bin/env python3
++"""
++EmbyCache – gemeinsame Funktionen für embycache_run.py, embycache_cleaner.py und embycache_setup.py.
++
++Enthält: Config mit Defaults und Validierung, Pfad-Übersetzung (Docker → Host → relativ zum Share),
++Emby-API-Client (nur Standardbibliothek, kein `requests`), Aufruf des Unraid move-Binaries,
++Lockfile, Exclude-Liste und Logging.
++
++Umgebungsvariablen (gelten für alle Scripte):
++  EMBYCACHE_DIR        Arbeitsverzeichnis für Settings, Exclude-Liste, Lock und logs/
++                       Default: das Verzeichnis, in dem die Scripte liegen
++  EMBYCACHE_CONFIG     Pfad zur Settings-JSON; Default: $EMBYCACHE_DIR/embycache_settings.json
++  EMBYCACHE_LOG_LEVEL  DEBUG | INFO | WARNING; Default INFO
++"""
++import copy
++import fcntl
++import glob
++import json
++import logging
++import os
++import shutil
++import subprocess
++import sys
++import urllib.error
++import urllib.parse
++import urllib.request
++from logging.handlers import RotatingFileHandler
++from pathlib import Path
++
++BASE_DIR = Path(os.environ.get("EMBYCACHE_DIR") or Path(__file__).resolve().parent)
++CONFIG_FILE = Path(os.environ.get("EMBYCACHE_CONFIG") or (BASE_DIR / "embycache_settings.json"))
++EXCLUDE_FILE = BASE_DIR / "embycache_exclude.txt"
++LOCK_FILE = BASE_DIR / "embycache.lock"
++LOG_DIR = BASE_DIR / "logs"
++
++MOVER_CANDIDATES = ["/usr/libexec/unraid/move", "/usr/local/sbin/move", "/usr/local/bin/move"]
++MOVER_PIDFILE = "/var/run/mover.pid"
++
++# Alle Config-Schlüssel mit Default. Unbekannte Schlüssel werden ignoriert, fehlende ergänzt.
++DEFAULTS = {
++    "cache_path": "/mnt/cache",          # Pool, auf den gecacht wird (z.B. /mnt/cache oder /mnt/master)
++    "array_path": "/mnt/user0",          # Array-Sicht ohne Pools (FUSE)
++    "user_path": "/mnt/user",            # Zusammengeführte Sicht (Emby sieht diese Pfade)
++    "array_disks_glob": "/mnt/disk[0-9]*",  # Echte Array-Disks (nur für array_source = disk)
++    "array_source": "user0",             # rsync-Quelle: user0 = /mnt/user0/... wie das Original, disk = echte /mnt/diskN-Pfade
++    "instances": [],                     # [{"servername": "...", "url": "...", "api_key": "...", "path_mappings": {...}}]
++    "path_mappings": {},                 # Globales Mapping Docker-Pfad -> Host-Pfad (/mnt/user/...)
++    "libraries": [],                     # Nur informativ (Wizard); Filter passiert über path_mappings
++    "valid_users": [],                   # Liste von User-IDs oder Dict {id: {"budget": "300G"}}; leer = alle Benutzer
++    "number_episodes": 3,                # Zähl-Modus: wie viele Folgen nach der aktuellen vorgeladen werden
++    "cache_budget": "",                  # Budget-Modus: z.B. "2.5T" oder "800G" – leer = Zähl-Modus
++    "movie_share_percent": 50,           # Budget-Modus: Anteil Filme am Benutzer-Budget (weich, nach Bytes)
++    "max_episodes_per_series": 0,        # Budget-Modus: Folgen pro Serie höchstens (0 = das Budget entscheidet)
++    "max_resume_items": 10,              # Wie viele "Weiterschauen"-Einträge pro Benutzer berücksichtigt werden
++    "max_favorite_series": 10,           # Wie viele Favoriten-Serien pro Benutzer (0 = keine Favoriten)
++    "min_free_percent": 20,              # Unter diesem Freiplatz (Prozent) wird nichts mehr auf den Cache kopiert
++    "movie_mode": "folder",              # folder = ganzer Filmordner mitnehmen, file = nur Dateien mit gleichem Namen
++    "create_share_root": False,          # Share-Wurzel auf dem Pool automatisch anlegen (ZFS: besser vorher als Dataset!)
++    "mover_bin": "",                     # Leer = automatisch erkennen
++    "mover_debug_level": 0,              # Parameter -d für das move-Binary (0 = still, 1..3 = ausführlicher)
++    "rsync_args": ["-aAX", "--numeric-ids"],  # Vollständige rsync-Optionen (Default = wie das Original)
++    "fill_tool": "rsync",                # Array -> Cache: rsync (kopieren + Quelle löschen) oder mover (Unraid move-Binary)
++    "api_timeout": 10,                   # Sekunden pro API-Aufruf
++}
++
++
++# --------------------------------------------------------------------------- Logging
++def setup_logging(name, filename):
++    """Rotierendes Logfile (10 MB x 20) plus Konsole. Level über EMBYCACHE_LOG_LEVEL."""
++    LOG_DIR.mkdir(parents=True, exist_ok=True)
++    level = getattr(logging, os.environ.get("EMBYCACHE_LOG_LEVEL", "INFO").upper(), logging.INFO)
++    log = logging.getLogger(name)
++    log.setLevel(level)
++    log.handlers.clear()
++    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
++    fh = RotatingFileHandler(LOG_DIR / filename, maxBytes=10 * 1024 * 1024, backupCount=20, encoding="utf-8")
++    fh.setFormatter(fmt)
++    sh = logging.StreamHandler(sys.stdout)
++    sh.setFormatter(fmt)
++    log.addHandler(fh)
++    log.addHandler(sh)
++    return log
++
++
++def human(size):
++    size = float(size)
++    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
++        if size < 1024:
++            return f"{size:.2f} {unit}"
++        size /= 1024
++    return f"{size:.2f} EB"
++
++
++# --------------------------------------------------------------------------- Config
++class ConfigError(Exception):
++    pass
++
++
++_UNITS = {"": 1, "B": 1, "K": 1024, "KB": 1024, "M": 1024 ** 2, "MB": 1024 ** 2, "G": 1024 ** 3, "GB": 1024 ** 3,
++          "T": 1024 ** 4, "TB": 1024 ** 4, "P": 1024 ** 5, "PB": 1024 ** 5}
++
++
++def parse_size(value):
++    """'2.5T', '800G', '100GB', '1536M' oder eine Zahl (Bytes) -> Bytes; leer/0 -> 0."""
++    if value is None:
++        return 0
++    if isinstance(value, (int, float)):
++        return int(value)
++    text = str(value).strip().upper().replace(" ", "")
++    if not text:
++        return 0
++    num = text.rstrip("KMGTPB")
++    unit = text[len(num):]
++    try:
++        return int(float(num) * _UNITS[unit])
++    except (ValueError, KeyError):
++        raise ConfigError(f"Ungültige Grössenangabe: '{value}' (erlaubt z.B. 2.5T, 800G, 100GB)")
++
++
++def load_config(require_paths=True):
++    """Liest die Settings-JSON, ergänzt Defaults und prüft das Nötigste."""
++    if not CONFIG_FILE.exists():
++        raise ConfigError(f"Konfiguration nicht gefunden: {CONFIG_FILE} – zuerst embycache_setup.py ausführen")
++    try:
++        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
++    except json.JSONDecodeError as e:
++        raise ConfigError(f"Konfiguration ist kein gültiges JSON ({CONFIG_FILE}): {e}")
++    for key, val in DEFAULTS.items():
++        cfg.setdefault(key, copy.deepcopy(val))
++
++    # Umgebungsvariablen überschreiben einzelne Werte
++    env_min = os.environ.get("EMBYCACHE_MIN_FREE_PERCENT")
++    if env_min:
++        cfg["min_free_percent"] = float(env_min)
++    env_dbg = os.environ.get("EMBYCACHE_MOVER_DEBUG")
++    if env_dbg:
++        cfg["mover_debug_level"] = int(env_dbg)
++    env_rsync = os.environ.get("EMBYCACHE_RSYNC_ARGS")
++    if env_rsync is not None:
++        cfg["rsync_args"] = env_rsync.split()
++    env_fill = os.environ.get("EMBYCACHE_FILL_TOOL")
++    if env_fill:
++        cfg["fill_tool"] = env_fill.lower()
++
++    for key in ("cache_path", "array_path", "user_path"):
++        cfg[key] = str(cfg[key]).rstrip("/") or "/"
++
++    env_budget = os.environ.get("EMBYCACHE_CACHE_BUDGET")
++    if env_budget is not None:
++        cfg["cache_budget"] = env_budget
++
++    # valid_users: Liste von IDs oder Dict {id: {"budget": "300G", ...}} -> Liste + feste Budgets
++    vu = cfg["valid_users"]
++    cfg["user_budgets"] = {}
++    if isinstance(vu, dict):
++        for uid, opts in vu.items():
++            b = parse_size((opts or {}).get("budget")) if isinstance(opts, dict) else 0
++            if b > 0:
++                cfg["user_budgets"][str(uid)] = b
++    cfg["valid_users"] = [str(k) for k in (vu.keys() if isinstance(vu, dict) else vu) if str(k).strip()]
++    cfg["cache_budget_bytes"] = parse_size(cfg["cache_budget"])
++    try:
++        cfg["movie_share_percent"] = float(cfg["movie_share_percent"])
++        cfg["max_episodes_per_series"] = int(cfg["max_episodes_per_series"])
++    except (TypeError, ValueError):
++        raise ConfigError("movie_share_percent muss eine Zahl 0–100, max_episodes_per_series eine ganze Zahl sein")
++    if not 0 <= cfg["movie_share_percent"] <= 100:
++        raise ConfigError("movie_share_percent muss zwischen 0 und 100 liegen")
++
++    if not cfg["instances"]:
++        raise ConfigError("Keine Emby-Instanz konfiguriert (instances)")
++    for i, inst in enumerate(cfg["instances"], 1):
++        inst["url"] = str(inst.get("url", "")).rstrip("/")
++        inst.setdefault("servername", f"Server{i}")
++        if not inst["url"] or not inst.get("api_key"):
++            raise ConfigError(f"Instanz {i} ({inst.get('servername')}): url oder api_key fehlt")
++        # Pro-Instanz-Mappings (README v6) und globale Mappings zusammenführen
++        merged = dict(cfg["path_mappings"])
++        merged.update(inst.get("path_mappings") or {})
++        inst["_mappings"] = {k.rstrip("/"): v.rstrip("/") for k, v in merged.items() if k and v}
++        if not inst["_mappings"]:
++            raise ConfigError(f"Instanz {i} ({inst['servername']}): keine path_mappings – ohne Mapping passiert nichts")
++
++    if require_paths:
++        for key in ("cache_path", "array_path"):
++            if not Path(cfg[key]).is_dir():
++                raise ConfigError(f"{key} existiert nicht: {cfg[key]}")
++    if cfg["movie_mode"] not in ("folder", "file"):
++        raise ConfigError("movie_mode muss 'folder' oder 'file' sein")
++    if cfg["fill_tool"] not in ("rsync", "mover"):
++        raise ConfigError("fill_tool muss 'rsync' oder 'mover' sein")
++    if cfg["array_source"] not in ("user0", "disk"):
++        raise ConfigError("array_source muss 'user0' oder 'disk' sein")
++    if not cfg["rsync_args"]:
++        raise ConfigError("rsync_args darf nicht leer sein (Original: [\"-aAX\", \"--numeric-ids\"])")
++    return cfg
++
++
++def save_config(cfg):
++    clean = {k: v for k, v in cfg.items() if not k.startswith("_")}
++    for inst in clean.get("instances", []):
++        inst.pop("_mappings", None)
++    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
++    CONFIG_FILE.write_text(json.dumps(clean, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
++
++
++# --------------------------------------------------------------------------- Emby API
++class EmbyApi:
++    """Minimaler Emby-Client auf urllib-Basis. API-Key geht als Header X-Emby-Token, nicht in die URL."""
++
++    def __init__(self, url, api_key, timeout=10):
++        self.url = url.rstrip("/")
++        self.api_key = api_key
++        self.timeout = timeout
++
++    def get(self, path, **params):
++        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
++        full = f"{self.url}{path}" + (f"?{query}" if query else "")
++        req = urllib.request.Request(full, headers={"X-Emby-Token": self.api_key, "Accept": "application/json"})
++        try:
++            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
++                return json.loads(resp.read().decode("utf-8") or "null")
++        except urllib.error.HTTPError as e:
++            raise RuntimeError(f"HTTP {e.code} bei {path}") from e
++        except (urllib.error.URLError, TimeoutError, OSError) as e:
++            raise RuntimeError(f"{path} nicht erreichbar: {e}") from e
++
++    def items(self, path, **params):
++        data = self.get(path, **params)
++        if isinstance(data, dict):
++            return data.get("Items", [])
++        return data or []
++
++
++# --------------------------------------------------------------------------- Pfade
++class Locations:
++    """Übersetzt Docker-Pfade in Host-Pfade und findet die Datei auf Cache, Array-Sicht und echter Disk."""
++
++    def __init__(self, cfg, mappings):
++        self.cache = Path(cfg["cache_path"])
++        self.array = Path(cfg["array_path"])
++        self.user = Path(cfg["user_path"])
++        self.disks_glob = cfg["array_disks_glob"]
++        self.mappings = mappings
++        # Bibliotheks-Wurzeln relativ zum Share (z.B. "Filme") – werden nie als Filmordner behandelt
++        self.library_roots = set()
++        for host in mappings.values():
++            rel = self.to_rel(host)
++            if rel is not None:
++                self.library_roots.add(rel)
++
++    def to_host(self, docker_path):
++        """Längstes passendes Mapping, Prefix nur an Pfadgrenzen."""
++        best, repl = "", ""
++        for d, h in self.mappings.items():
++            if (docker_path == d or docker_path.startswith(d + "/")) and len(d) > len(best):
++                best, repl = d, h
++        if not best:
++            return None
++        return repl + docker_path[len(best):]
++
++    def to_rel(self, host_path):
++        """Host-Pfad -> Pfad relativ zur Share-Ebene (z.B. /mnt/user/Filme/X/x.mkv -> Filme/X/x.mkv)."""
++        p = Path(host_path)
++        for root in (self.user, self.array, self.cache):
++            try:
++                rel = p.relative_to(root)
++            except ValueError:
++                continue
++            return rel if rel.parts else None
++        return None
++
++    def rel_from_docker(self, docker_path):
++        host = self.to_host(docker_path)
++        return None if host is None else self.to_rel(host)
++
++    def on_cache(self, rel):
++        return self.cache / rel
++
++    def on_array(self, rel):
++        return self.array / rel
++
++    def on_disk(self, rel):
++        """Echte Disk-Pfade (z.B. /mnt/disk3/Filme/...), auf denen die Datei liegt."""
++        return [Path(p) for p in sorted(glob.glob(str(Path(self.disks_glob) / rel))) if Path(p).exists()]
++
++    def is_library_root(self, rel):
++        return len(rel.parts) <= 1 or rel in self.library_roots
++
++    def list_files(self, rel_dir, recursive):
++        """Dateien unter rel_dir – Union aus Array-Sicht und Cache (ersetzt den FUSE-Blick über /mnt/user)."""
++        found = set()
++        for root in (self.array, self.cache):
++            base = root / rel_dir
++            if not base.is_dir():
++                continue
++            it = base.rglob("*") if recursive else base.iterdir()
++            for f in it:
++                if f.is_file():
++                    found.add(f.relative_to(root))
++        return sorted(found)
++
++
++def remove_empty_parents(path, stop_root, log, min_depth=2):
++    """Löscht leere Elternordner von path bis (exklusiv) stop_root; Share-Wurzel (Tiefe 1) bleibt immer stehen."""
++    p = Path(path)
++    while True:
++        try:
++            rel = p.relative_to(stop_root)
++        except ValueError:
++            return
++        if len(rel.parts) < min_depth or not p.is_dir():
++            return
++        try:
++            next(p.iterdir())
++            return  # nicht leer
++        except StopIteration:
++            pass
++        try:
++            p.rmdir()
++            log.info(f"Leeren Ordner entfernt: {p}")
++        except OSError as e:
++            log.warning(f"Leerer Ordner konnte nicht entfernt werden: {p} ({e})")
++            return
++        p = p.parent
++
++
++def free_percent_after(path, size):
++    """Freiplatz in Prozent, nachdem `size` Bytes geschrieben wären (bei ZFS-Quota zählt die Quota)."""
++    u = shutil.disk_usage(path)
++    if u.total == 0:
++        return 0.0
++    return max(0.0, (u.free - size) / u.total * 100.0)
++
++
++# --------------------------------------------------------------------------- Mover
++def detect_mover_bin(cfg):
++    if cfg.get("mover_bin"):
++        return cfg["mover_bin"]
++    for cand in MOVER_CANDIDATES:
++        if os.path.exists(cand):
++            return cand
++    return None
++
++
++def unraid_mover_running():
++    """True, wenn der reguläre Unraid-Mover (mover-Script) gerade läuft."""
++    try:
++        pid = int(Path(MOVER_PIDFILE).read_text().strip())
++    except (OSError, ValueError):
++        return False
++    return Path(f"/proc/{pid}").exists()
++
++
++def run_mover(mover_bin, paths, debug_level, log):
++    """Pipt Dateipfade ins Unraid move-Binary (Pool -> Array). Liefert (returncode, stdout, stderr)."""
++    cmd = [mover_bin]
++    if int(debug_level) > 0:
++        cmd += ["-d", str(int(debug_level))]
++    log.debug(f"Mover-Aufruf: {' '.join(cmd)} mit {len(paths)} Pfaden")
++    try:
++        proc = subprocess.run(cmd, input="\n".join(paths) + "\n", capture_output=True, text=True)
++    except OSError as e:
++        log.error(f"move-Binary konnte nicht gestartet werden ({mover_bin}): {e}")
++        return 1, "", str(e)
++    for line in proc.stdout.splitlines():
++        log.info(f"mover: {line}")
++    for line in proc.stderr.splitlines():
++        log.warning(f"mover: {line}")
++    if proc.returncode != 0:
++        log.error(f"move-Binary endete mit Code {proc.returncode}")
++    return proc.returncode, proc.stdout, proc.stderr
++
++
++# --------------------------------------------------------------------------- Lock / Exclude
++def acquire_lock(log):
++    """Exklusives flock auf embycache.lock; None, wenn bereits ein Lauf aktiv ist."""
++    fh = open(LOCK_FILE, "w")
++    try:
++        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except OSError:
++        fh.close()
++        log.warning(f"Ein anderer EmbyCache-Lauf ist aktiv ({LOCK_FILE}) – Abbruch")
++        return None
++    fh.write(str(os.getpid()))
++    fh.flush()
++    return fh
++
++
++def read_exclude():
++    if not EXCLUDE_FILE.exists():
++        return set()
++    return {line.strip() for line in EXCLUDE_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
++
++
++def write_exclude(paths):
++    """Atomar schreiben (temp + rename), damit Mover Tuning nie eine halbe Liste liest."""
++    tmp = EXCLUDE_FILE.with_suffix(".tmp")
++    tmp.write_text("\n".join(sorted(set(paths))) + ("\n" if paths else ""), encoding="utf-8")
++    os.replace(tmp, EXCLUDE_FILE)
++
++
++def collect_sessions(cfg, log):
++    """Gerade abgespielte Dateien aller Instanzen: relative Pfade plus Dateinamen (Fallback ohne Mapping).
++    Liefert ((rels, names), ok) – ok=False, wenn eine Instanz nicht geantwortet hat."""
++    rels, names = set(), set()
++    ok = True
++    for inst in cfg["instances"]:
++        api = EmbyApi(inst["url"], inst["api_key"], cfg["api_timeout"])
++        loc = Locations(cfg, inst["_mappings"])
++        try:
++            sessions = api.get("/Sessions") or []
++        except RuntimeError as e:
++            log.warning(f"[{inst['servername']}] Sessions nicht abrufbar: {e}")
++            ok = False
++            continue
++        for s in sessions:
++            item = s.get("NowPlayingItem") or {}
++            p = item.get("Path")
++            if not p:
++                continue
++            names.add(os.path.basename(p))
++            rel = loc.rel_from_docker(p)
++            if rel is not None:
++                rels.add(str(rel))
++                log.info(f"[{inst['servername']}] Läuft gerade ({s.get('UserName', '?')}): {rel}")
++    return (rels, names), ok
++
++
++def is_playing(rel, sessions):
++    rels, names = sessions
++    return str(rel) in rels or Path(rel).name in names
+diff --git a/embycache_run.py b/embycache_run.py
+index cd4b6df..acd5596 100644
+--- a/embycache_run.py
++++ b/embycache_run.py
+@@ -1,204 +1,611 @@
+ #!/usr/bin/env python3
++"""
++EmbyCache – holt «Weiterschauen»-Inhalte, die nächsten Folgen und Favoriten-Serien der Emby-Benutzer
++vom Unraid-Array auf den Cache-Pool und räumt nicht mehr benötigte Dateien wieder aufs Array.
++
++Ablauf pro Lauf:
++  1. Sessions abfragen – was gerade läuft, wird nie angefasst
++  2. On-Deck-Liste berechnen (Resume-Einträge, nächste Folgen in Serienreihenfolge, Favoriten)
++       Zähl-Modus (Default): number_episodes Folgen pro Serie, max_resume_items Einträge pro Benutzer
++       Budget-Modus (cache_budget gesetzt, z.B. "2.5T"): das Budget wird fair auf die aktiven Benutzer verteilt
++       (feste Budgets pro Benutzer möglich, ungenutzter Anteil fliesst an die anderen); pro Benutzer werden
++       Filme und Serien nach Bytes im Verhältnis movie_share_percent gefüllt, Serien reihum eine Folge pro
++       Runde – kleine Folgen ergeben viele, grosse wenige. Was nicht ins Budget passt, bleibt auf dem Array.
++  3. Cleanup: Dateien aus der alten Exclude-Liste, die nicht mehr on deck sind -> Unraid move-Binary (Cache -> Array)
++  4. Befüllen: On-Deck-Dateien, die noch auf dem Array liegen -> auf den Cache. Werkzeug per fill_tool:
++       rsync (Default): rsync -aAX --numeric-ids /mnt/user0/<rel> /mnt/<pool>/<rel> – exakt wie das Original;
++                        Quelle erst nach Rückgabecode 0 und Grössenvergleich löschen. array_source = disk liest
++                        stattdessen vom echten /mnt/diskN-Pfad (schneller, am FUSE vorbei) – optional
++       mover:           Array-Pfade ans Unraid move-Binary pipen (wie der Stock-Mover bei «prefer»-Shares);
++                        das Binary wählt den Pool aus der Share-Konfiguration – vorher mit einer Datei testen
++     Der Freiplatz-Floor wird in beiden Fällen vorher geprüft
++  5. Exclude-Liste neu schreiben (alle On-Deck-Dateien, die jetzt auf dem Cache liegen)
++
++Aufruf:
++  python3 embycache_run.py                 Dry-Run: zeigt alle geplanten Aktionen, verändert nichts
++  python3 embycache_run.py --show-on-deck  Report: On-Deck-Liste mit Speicherort, keine Dateioperationen
++  python3 embycache_run.py --run           Scharf
++
++Umgebungsvariablen (überschreiben Config bzw. Defaults; CLI-Flags haben Vorrang vor EMBYCACHE_MODE):
++  EMBYCACHE_MODE              dry | report | run
++  EMBYCACHE_DIR               Arbeitsverzeichnis (Settings, Exclude-Liste, Lock, logs/); Default: Script-Verzeichnis
++  EMBYCACHE_CONFIG            Pfad zur Settings-JSON
++  EMBYCACHE_LOG_LEVEL         DEBUG | INFO | WARNING (Default INFO)
++  EMBYCACHE_MIN_FREE_PERCENT  Mindest-Freiplatz auf dem Cache in Prozent (überschreibt min_free_percent)
++  EMBYCACHE_MOVER_DEBUG       0–3, Parameter -d für das move-Binary (überschreibt mover_debug_level)
++  EMBYCACHE_RSYNC_ARGS        vollständige rsync-Optionen, Default "-aAX --numeric-ids" (überschreibt rsync_args)
++  EMBYCACHE_FILL_TOOL         rsync | mover (überschreibt fill_tool)
++  EMBYCACHE_CACHE_BUDGET      z.B. "2.5T" (überschreibt cache_budget; "" = Zähl-Modus)
++
++Beispiel User Scripts (Unraid):  cd /mnt/user/system/scripts/embycache && python3 embycache_run.py --run
++"""
++import argparse
+ import os
+-import sys
+-import json
+-import logging
+ import subprocess
+-import argparse
++import sys
+ from pathlib import Path
+-from logging.handlers import RotatingFileHandler
+-
+-# Logging Setup (Requirement: 10MB, 20 Files, English Logs)
+-logDir = Path("logs")
+-logDir.mkdir(exist_ok=True)
+-logHandler = RotatingFileHandler(logDir / "embycache.log", maxBytes=10*1024*1024, backupCount=20, encoding="utf-8")
+-logHandler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+-log = logging.getLogger("EmbyCache")
+-log.setLevel(logging.INFO)
+-log.addHandler(logHandler)
+-log.addHandler(logging.StreamHandler(sys.stdout))
+-
+-class EmbyCache:
+-    def __init__(self, runMode=False):
+-        self.runMode = runMode
+-        self.config = self.loadConfig()
+-        self.excludeFile = Path("embycache_exclude.txt")
+-        self.previousExcludeList = self.loadPreviousExclude()
+-        self.moverBin = self.detectMoverBin()
+-        self.currentOnDeckPaths = set()
+-        self.toCacheBytes = 0
+-        self.toArrayBytes = 0
+-
+-    def loadConfig(self):
+-        p = Path("embycache_settings.json")
+-        if not p.exists():
+-            log.error("Configuration file not found!")
+-            sys.exit(1)
+-        return json.loads(p.read_text(encoding="utf-8"))
+-
+-    def loadPreviousExclude(self):
+-        if not self.excludeFile.exists(): return set()
+-        try:
+-            return set(line.strip() for line in self.excludeFile.read_text(encoding="utf-8").splitlines() if line.strip())
+-        except Exception as e:
+-            log.error(f"Error loading exclude file: {e}")
+-            return set()
+ 
+-    def detectMoverBin(self):
+-        if os.path.exists("/usr/libexec/unraid/move"): return "/usr/libexec/unraid/move"
+-        return "/usr/local/bin/move"
++from embycache_lib import (
++    ConfigError, EmbyApi, Locations, acquire_lock, collect_sessions, detect_mover_bin, free_percent_after,
++    human, is_playing, load_config, read_exclude, remove_empty_parents, run_mover, setup_logging,
++    unraid_mover_running, write_exclude, EXCLUDE_FILE,
++)
+ 
+-    def formatSize(self, size):
+-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+-            if size < 1024: return f"{size:.2f} {unit}"
+-            size /= 1024
++log = setup_logging("EmbyCache", "embycache.log")
+ 
+-    def isProtectedRoot(self, folderPath, basePath):
+-        try:
+-            rel = Path(folderPath).relative_to(basePath)
+-            return len(rel.parts) <= 1
+-        except: return True
+-
+-    def cleanupEmptyDirs(self, folderPath, basePath):
+-        if not self.runMode: return
+-        p, base = Path(folderPath), Path(basePath)
+-        if self.isProtectedRoot(p, base): return
+-        try:
+-            if p.exists() and p.is_dir() and not any(p.iterdir()):
+-                p.rmdir()
+-                log.info(f"Removed empty directory: {p}")
+-                self.cleanupEmptyDirs(p.parent, base)
+-        except: pass
+-
+-    def getHostPath(self, dockerPath):
+-        mappings = self.config.get("path_mappings", {})
+-        bestMatch = ""; replacement = ""
+-        for dPath, hPath in mappings.items():
+-            if dockerPath.startswith(dPath) and len(dPath) > len(bestMatch):
+-                bestMatch = dPath; replacement = hPath
+-        return dockerPath.replace(bestMatch, replacement, 1) if bestMatch else dockerPath
+-
+-    def getFilesToMove(self, embyItem):
+-        rawPath = embyItem.get("Path", "")
+-        if not rawPath: return []
+-        
+-        hostPath = Path(self.getHostPath(rawPath))
++
++class OnDeckFile:
++    __slots__ = ("rel", "size", "on_cache", "reason")
++
++    def __init__(self, rel, size, on_cache, reason):
++        self.rel, self.size, self.on_cache, self.reason = rel, size, on_cache, reason
++
++
++# --------------------------------------------------------------------------- Planung
++class Group:
++    """Atomare Planungseinheit: alle Dateien eines Items (Film + Untertitel + Extras, Folge + srt …)."""
++    __slots__ = ("files", "size", "category", "chain", "reason")
++
++    def __init__(self, files, category, chain, reason):
++        self.files, self.category, self.chain, self.reason = files, category, chain, reason
++        self.size = sum(f.size for f in files)
++
++
++class UserPlan:
++    """Kandidaten und Auswahl eines Benutzers (pro Instanz)."""
++
++    def __init__(self, key, name):
++        self.key, self.name = key, name
++        self.movies = []       # Group, nach Aktualität (Weiterschauen)
++        self.series = []       # Group, reihum über alle laufenden Serien und Favoriten
++        self.selected = []
++        self.skipped = []
++        self.bytes = self.movie_bytes = self.series_bytes = 0
++        self.budget = None
++        self.exhausted = True
++
++    def has_candidates(self):
++        return bool(self.movies or self.series)
++
++
++class Planner:
++    def __init__(self, cfg):
++        self.cfg = cfg
++        self.files = {}      # rel (str) -> OnDeckFile (Ergebnis)
++        self.users = {}      # key -> UserPlan
++        self.errors = 0      # API-Fehler: Planung unvollständig -> kein Cleanup in diesem Lauf
++        self.budget_mode = int(cfg["cache_budget_bytes"]) > 0
++
++    # ------------------------------------------------------------------ Dateien eines Items
++    def files_for_item(self, loc, item):
++        """Ermittelt alle Dateien (relativ zur Share-Ebene), die zu einem Emby-Item gehören."""
++        raw = item.get("Path") or ""
++        if not raw or item.get("LocationType") == "Virtual":
++            return []
++        rel = loc.rel_from_docker(raw)
++        if rel is None:
++            log.warning(f"Kein Path-Mapping für {raw} – Item übersprungen (Mapping in der Config prüfen)")
++            return []
++        exists_dir = loc.on_array(rel).is_dir() or loc.on_cache(rel).is_dir()
++        exists_file = loc.on_array(rel).is_file() or loc.on_cache(rel).is_file()
++        if not exists_dir and not exists_file:
++            log.warning(f"Datei nicht gefunden: {rel} (Mapping oder array_path/cache_path prüfen)")
++            return []
++        if exists_dir:
++            # Ordner-Item (DVD/BluRay-Struktur): den Ordner selbst mitnehmen, nie den Elternordner
++            return loc.list_files(rel, recursive=True)
++        parent = rel.parent
++        if item.get("Type") == "Movie" and self.cfg["movie_mode"] == "folder" and not loc.is_library_root(parent):
++            return loc.list_files(parent, recursive=True)
++        # Episoden, Filme in flacher Ablage, movie_mode=file: nur Dateien mit gleichem Basisnamen (mkv, srt, nfo …)
++        stem = rel.stem
++        return [f for f in loc.list_files(parent, recursive=False) if f.name.startswith(stem)]
++
++    def make_group(self, loc, item, category, chain, reason):
++        files = []
++        for rel in self.files_for_item(loc, item):
++            cache_p = loc.on_cache(rel)
++            on_cache = cache_p.exists()
++            src = cache_p if on_cache else loc.on_array(rel)
++            try:
++                size = src.stat().st_size
++            except OSError as e:
++                log.warning(f"Datei nicht lesbar, übersprungen: {src} ({e})")
++                continue
++            files.append(OnDeckFile(rel, size, on_cache, reason))
++        return Group(files, category, chain, reason) if files else None
++
++    # ------------------------------------------------------------------ Emby-Abfragen
++    @staticmethod
++    def ep_key(ep):
++        return (ep.get("ParentIndexNumber") if ep.get("ParentIndexNumber") is not None else -1,
++                ep.get("IndexNumber") if ep.get("IndexNumber") is not None else -1)
++
++    def series_episodes(self, api, uid, series_id):
++        eps = api.items(f"/Users/{uid}/Items", ParentId=series_id, Recursive="true", IncludeItemTypes="Episode",
++                        SortBy="ParentIndexNumber,IndexNumber", SortOrder="Ascending",
++                        Fields="Path,ParentIndexNumber,IndexNumber,LocationType")
++        eps = [e for e in eps if e.get("Path") and e.get("LocationType") != "Virtual"]
++        return sorted(eps, key=self.ep_key)
++
++    def episode_cap(self):
++        """Wie viele Folgen pro Serie höchstens: Zähl-Modus number_episodes (0 = keine),
++        Budget-Modus max_episodes_per_series (0 = unbegrenzt, das Budget entscheidet)."""
++        if self.budget_mode:
++            n = int(self.cfg["max_episodes_per_series"])
++            return n if n > 0 else None
++        n = int(self.cfg["number_episodes"])
++        return n if n > 0 else 0
++
++    def next_episodes_after(self, api, uid, current):
++        """Die Folgen nach der aktuellen – in Staffel-/Folgenreihenfolge, unabhängig vom Gesehen-Status."""
++        cap = self.episode_cap()
++        if cap == 0 or not current.get("SeriesId"):
++            return []
++        cur = self.ep_key(current)
++        eps = self.series_episodes(api, uid, current["SeriesId"])
++        after = [e for e in eps if self.ep_key(e) > cur and e.get("Id") != current.get("Id")]
++        return after[:cap] if cap else after
++
++    def next_unplayed(self, api, uid, series_id):
++        """Für Favoriten ohne Resume-Eintrag: ab der ersten ungesehenen Folge."""
++        cap = self.episode_cap()
++        if cap == 0:
++            return []
++        eps = self.series_episodes(api, uid, series_id)
++        unplayed = [e for e in eps if not (e.get("UserData") or {}).get("Played")]
++        return unplayed[:cap] if cap else unplayed
++
++    # ------------------------------------------------------------------ Kandidaten pro Benutzer
++    def plan_user(self, api, loc, name, uid, uname):
++        up = UserPlan(f"{name}:{uid}", uname)
+         try:
+-            # Safely calculate relative path from /mnt/user/
+-            relPath = Path(*hostPath.parts[3:]) 
+-            arrayPath = Path(self.config["array_path"]) / relPath
+-            cachePath = Path(self.config["cache_path"]) / relPath
+-            
+-            actualPath = arrayPath if arrayPath.exists() else (cachePath if cachePath.exists() else None)
+-            if not actualPath: return []
+-
+-            files = []
+-            if embyItem.get("Type") == "Movie":
+-                for f in actualPath.parent.rglob("*"):
+-                    if f.is_file(): files.append(f)
+-            else:
+-                baseName = actualPath.stem
+-                for f in actualPath.parent.iterdir():
+-                    if f.is_file() and f.name.startswith(baseName): files.append(f)
+-            return files
+-        except: return []
++            resume = api.items(f"/Users/{uid}/Items/Resume", MediaTypes="Video", Limit=int(self.cfg["max_resume_items"]),
++                               Fields="Path,SeriesId,ParentIndexNumber,IndexNumber,LocationType")
++        except RuntimeError as e:
++            self.errors += 1; log.error(f"[{name}] Resume-Liste von {uname} nicht abrufbar: {e}")
++            return
++        chains = []  # Listen von Groups je Serie, in Aktualitätsreihenfolge
++        seen_series = set()
++        for item in resume:
++            if item.get("Type") == "Movie":
++                g = self.make_group(loc, item, "movie", f"movie:{item.get('Id')}", f"{uname}: Weiterschauen «{item.get('Name', '?')}»")
++                if g:
++                    up.movies.append(g)
++                continue
++            if item.get("Type") != "Episode":
++                continue
++            sname = item.get("SeriesName", "?")
++            sid = item.get("SeriesId") or f"ep:{item.get('Id')}"
++            if sid in seen_series:
++                continue
++            seen_series.add(sid)
++            chain = []
++            g = self.make_group(loc, item, "series", f"series:{sid}", f"{uname}: Weiterschauen «{sname} – {item.get('Name', '?')}»")
++            if g:
++                chain.append(g)
++            try:
++                for ep in self.next_episodes_after(api, uid, item):
++                    g = self.make_group(loc, ep, "series", f"series:{sid}", f"{uname}: nächste Folge von «{sname}»")
++                    if g:
++                        chain.append(g)
++            except RuntimeError as e:
++                self.errors += 1; log.error(f"[{name}] Folgen von «{sname}» nicht abrufbar: {e}")
++            if chain:
++                chains.append(chain)
+ 
+-    def run(self):
+-        import requests
+-        log.info(f"=== EmbyCache RUN_MODE: {self.runMode} ===")
+-        
+-        sessions = set()
+-        for inst in self.config["instances"]:
++        max_fav = int(self.cfg["max_favorite_series"])
++        if max_fav > 0:
+             try:
+-                r = requests.get(f"{inst['url']}/Sessions", params={"api_key": inst['api_key']}, timeout=5)
+-                if r.status_code == 200:
+-                    for s in r.json():
+-                        if "NowPlayingItem" in s:
+-                            p = s["NowPlayingItem"].get("Path")
+-                            if p: sessions.add(os.path.basename(p))
+-            except: pass
+-
+-        numEps = self.config.get("number_episodes", 3)
+-        validUsers = self.config.get("valid_users", [])
+-        arrayRoot = Path(self.config["array_path"])
+-        cacheRoot = Path(self.config["cache_path"])
+-
+-        plannedItems = []
+-        seenFiles = set()
+-
+-        # Phase 1: Planning
+-        for inst in self.config["instances"]:
+-            for uid in validUsers:
++                favs = api.items(f"/Users/{uid}/Items", Recursive="true", IncludeItemTypes="Series",
++                                 Filters="IsFavorite", Limit=max_fav, Fields="Path")
++            except RuntimeError as e:
++                self.errors += 1; log.error(f"[{name}] Favoriten von {uname} nicht abrufbar: {e}")
++                favs = []
++            for series in favs:
++                sid = series.get("Id")
++                if sid in seen_series:
++                    continue
++                seen_series.add(sid)
++                chain = []
+                 try:
+-                    rRes = requests.get(f"{inst['url']}/Users/{uid}/Items/Resume", params={"api_key": inst['api_key'], "Fields": "Path,Type,SeriesId", "MediaTypes": "Video"}, timeout=10)
+-                    rFav = requests.get(f"{inst['url']}/Users/{uid}/Items", params={"api_key": inst['api_key'], "Recursive": "true", "IncludeItemTypes": "Series", "Filters": "IsFavorite", "Fields": "Path"}, timeout=10)
+-                    
+-                    items = rRes.json().get("Items", [])[:numEps*2] if rRes.status_code == 200 else []
+-                    favs = rFav.json().get("Items", []) if rFav.status_code == 200 else []
+-
+-                    for item in items + favs:
+-                        # Process main item
+-                        for f in self.getFilesToMove(item):
+-                            if f not in seenFiles: plannedItems.append(f); seenFiles.add(f)
+-                        # Process next episodes
+-                        seriesId = item.get("SeriesId") if item.get("Type") == "Episode" else (item.get("Id") if item.get("Type") == "Series" else None)
+-                        if seriesId:
+-                            rNext = requests.get(f"{inst['url']}/Users/{uid}/Items", params={"api_key": inst['api_key'], "ParentId": seriesId, "Recursive": "true", "IncludeItemTypes": "Episode", "IsPlayed": "false", "Limit": numEps, "Fields": "Path"}, timeout=5)
+-                            if rNext.status_code == 200:
+-                                for ne in rNext.json().get("Items", []):
+-                                    for f in self.getFilesToMove(ne):
+-                                        if f not in seenFiles: plannedItems.append(f); seenFiles.add(f)
+-                except: continue
+-
+-        # Phase 1: Execution (Array -> Cache)
+-        for fPath in plannedItems:
+-            isArray = arrayRoot in fPath.parents
+-            cPathVersion = cacheRoot / fPath.relative_to(arrayRoot) if isArray else fPath
+-            self.currentOnDeckPaths.add(str(cPathVersion))
+-
+-            if isArray and not cPathVersion.exists():
+-                if fPath.name not in sessions:
+-                    try:
+-                        fileSize = fPath.stat().st_size
+-                        self.toCacheBytes += fileSize
+-                        log.info(f"[PLAN: -> CACHE] {fPath.name}")
+-                        if self.runMode:
+-                            cPathVersion.parent.mkdir(parents=True, exist_ok=True)
+-                            if subprocess.run(["rsync", "-aAX", "--numeric-ids", str(fPath), str(cPathVersion)], capture_output=True).returncode == 0:
+-                                fPath.unlink()
+-                                self.cleanupEmptyDirs(fPath.parent, arrayRoot)
+-                    except: pass
+-
+-        # Phase 2: Cleanup (Cache -> Array via Mover)
+-        filesToMoveBack = []
+-        for oldFileStr in self.previousExcludeList:
+-            oldFile = Path(oldFileStr)
+-            if str(oldFile) in self.currentOnDeckPaths or not oldFile.exists(): continue
+-            if oldFile.name in sessions:
+-                self.currentOnDeckPaths.add(str(oldFile)); continue
+-            
++                    for ep in self.next_unplayed(api, uid, sid):
++                        g = self.make_group(loc, ep, "series", f"series:{sid}", f"{uname}: Favorit «{series.get('Name', '?')}»")
++                        if g:
++                            chain.append(g)
++                except RuntimeError as e:
++                    self.errors += 1; log.error(f"[{name}] Folgen von Favorit «{series.get('Name', '?')}» nicht abrufbar: {e}")
++                if chain:
++                    chains.append(chain)
++
++        # Reihum über alle Serien: jede Serie eine Folge pro Runde – kleine Folgen ergeben so
++        # automatisch mehr Stück im Budget als grosse, keine Serie kann alles belegen
++        pos = 0
++        while any(pos < len(c) for c in chains):
++            for c in chains:
++                if pos < len(c):
++                    up.series.append(c[pos])
++            pos += 1
++        self.users[up.key] = up
++
++    def plan_instance(self, inst, uids):
++        api = EmbyApi(inst["url"], inst["api_key"], self.cfg["api_timeout"])
++        loc = Locations(self.cfg, inst["_mappings"])
++        name = inst["servername"]
++        if not uids:
+             try:
+-                self.toArrayBytes += oldFile.stat().st_size
+-                log.info(f"[PLAN: -> ARRAY] {oldFile.name}")
+-                filesToMoveBack.append(str(oldFile))
+-            except: pass
+-
+-        if self.runMode and filesToMoveBack:
+-            process = subprocess.Popen([self.moverBin], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+-            stdout, stderr = process.communicate(input="\n".join(filesToMoveBack) + "\n")
+-            # Log mover results for transparency
+-            for line in stdout.splitlines(): log.info(line)
+-            for f in filesToMoveBack: self.cleanupEmptyDirs(Path(f).parent, cacheRoot)
+-
+-        # Final Statistics
+-        log.info(f"Statistics: In: {self.formatSize(self.toCacheBytes)} | Out: {self.formatSize(self.toArrayBytes)}")
+-        if self.runMode:
+-            self.excludeFile.write_text("\n".join(sorted(list(self.currentOnDeckPaths))), encoding="utf-8")
++                users = api.get("/Users") or []
++            except RuntimeError as e:
++                self.errors += 1; log.error(f"[{name}] Benutzerliste nicht abrufbar: {e}")
++                return
++            uids = [(u["Id"], u.get("Name", u["Id"])) for u in users]
++        for uid, uname in uids:
++            self.plan_user(api, loc, name, uid, uname)
+ 
+-if __name__ == "__main__":
+-    parser = argparse.ArgumentParser(); parser.add_argument("--run", action="store_true"); args = parser.parse_args()
++    # ------------------------------------------------------------------ Auswahl
++    @staticmethod
++    def select(up, budget, movie_share):
++        """Füllt das Budget eines Benutzers: Filme und Serien im Verhältnis movie_share nach Bytes (weich –
++        ist eine Kategorie leer, bekommt die andere den Rest). Passt ein Eintrag nicht mehr, wird seine
++        Kette (die Serie) gestoppt, damit nie Folge 5 ohne Folge 4 gecacht wird."""
++        queues = {"movie": up.movies, "series": up.series}
++        idx = {"movie": 0, "series": 0}
++        used = {"movie": 0, "series": 0}
++        target = {"movie": budget * movie_share, "series": budget * (1.0 - movie_share)}
++        stopped = set()
++        up.selected, up.skipped, up.bytes = [], [], 0
++
++        def fill_fraction(cat):
++            return (used[cat] / target[cat]) if target[cat] > 0 else float("inf")
++
++        while True:
++            avail = [c for c in ("movie", "series") if idx[c] < len(queues[c])]
++            if not avail:
++                break
++            cat = min(avail, key=fill_fraction)
++            g = queues[cat][idx[cat]]
++            idx[cat] += 1
++            if g.chain in stopped:
++                up.skipped.append(g)
++                continue
++            if up.bytes + g.size > budget:
++                stopped.add(g.chain)
++                up.skipped.append(g)
++                continue
++            up.selected.append(g)
++            up.bytes += g.size
++            used[cat] += g.size
++        up.movie_bytes, up.series_bytes = used["movie"], used["series"]
++        up.exhausted = not up.skipped
++        up.budget = budget
++
++    def apply_budget(self):
++        """Verteilt cache_budget fair: feste Benutzer-Budgets zuerst, der Rest gleichmässig auf alle
++        aktiven Benutzer; was ein Benutzer nicht braucht, fliesst an die anderen (Water-Filling)."""
++        total = int(self.cfg["cache_budget_bytes"])
++        share = float(self.cfg["movie_share_percent"]) / 100.0
++        user_budgets = self.cfg["user_budgets"]
++        active = [u for u in self.users.values() if u.has_candidates()]
++        explicit = {u.key: user_budgets[u.key.split(":", 1)[1]] for u in active if u.key.split(":", 1)[1] in user_budgets}
++        pool = total - sum(explicit.values())
++        if pool < 0:
++            log.warning(f"Feste Benutzer-Budgets ({human(sum(explicit.values()))}) übersteigen cache_budget ({human(total)})")
++            pool = 0
++        flexible = [u for u in active if u.key not in explicit]
++        fixed = {}
++        cap = 0.0
++        for _ in range(len(flexible) + 1):
++            open_users = [u for u in flexible if u.key not in fixed]
++            if not open_users:
++                break
++            cap = (pool - sum(fixed.values())) / len(open_users)
++            changed = False
++            for u in open_users:
++                self.select(u, cap, share)
++                if u.exhausted and u.bytes < cap:
++                    fixed[u.key] = u.bytes
++                    changed = True
++            if not changed:
++                break
++        for u in flexible:
++            if u.key not in fixed:
++                self.select(u, cap, share)
++        for u in active:
++            if u.key in explicit:
++                self.select(u, float(explicit[u.key]), share)
++        for u in active:
++            skipped = sum(g.size for g in u.skipped)
++            log.info(f"Budget {u.name}: {human(u.bytes)} von {human(u.budget)} "
++                     f"(Filme {human(u.movie_bytes)}, Serien {human(u.series_bytes)})"
++                     + (f" – nicht im Budget: {len(u.skipped)} Einträge, {human(skipped)}" if u.skipped else ""))
++
++    def run(self):
++        wanted = self.cfg["valid_users"]
++        for inst in self.cfg["instances"]:
++            uids = []
++            if wanted:
++                # Namen für die Log-Ausgabe auflösen; unbekannte IDs (z.B. andere Instanz) still überspringen
++                try:
++                    known = {u["Id"]: u.get("Name", u["Id"]) for u in EmbyApi(inst["url"], inst["api_key"], self.cfg["api_timeout"]).get("/Users") or []}
++                except RuntimeError as e:
++                    self.errors += 1; log.error(f"[{inst['servername']}] nicht erreichbar: {e}")
++                    continue
++                uids = [(u, known[u]) for u in wanted if u in known]
++                if not uids:
++                    log.warning(f"[{inst['servername']}] keiner der konfigurierten Benutzer existiert auf dieser Instanz")
++                    continue
++            self.plan_instance(inst, uids)
++
++        if self.budget_mode:
++            self.apply_budget()
++        else:
++            for u in self.users.values():
++                u.selected = u.movies + u.series
++        for u in self.users.values():
++            for g in u.selected:
++                for f in g.files:
++                    self.files.setdefault(str(f.rel), f)
++        if self.budget_mode:
++            total = sum(f.size for f in self.files.values())
++            log.info(f"Budget gesamt: {human(total)} von {human(int(self.cfg['cache_budget_bytes']))} "
++                     f"für {sum(1 for u in self.users.values() if u.has_candidates())} aktive Benutzer")
++        return list(self.files.values())
++
++
++# --------------------------------------------------------------------------- Ausführung
++class Runner:
++    def __init__(self, cfg, mode):
++        self.cfg = cfg
++        self.mode = mode  # dry | report | run
++        self.run_mode = mode == "run"
++        self.to_cache = self.to_array = 0
++        self.copied = self.moved_back = 0
++
++    def cleanup(self, loc, current, sessions, protected):
++        """Alte Exclude-Einträge, die nicht mehr on deck sind -> move-Binary (Cache -> Array)."""
++        previous = read_exclude()
++        candidates = []
++        for p in sorted(previous):
++            if p in current:
++                continue
++            path = Path(p)
++            if not path.exists():
++                continue
++            try:
++                rel = path.relative_to(loc.cache)
++            except ValueError:
++                log.warning(f"Exclude-Eintrag liegt nicht unter {loc.cache}, ignoriert: {p}")
++                continue
++            if is_playing(rel, sessions):
++                log.info(f"[BLEIBT: läuft gerade] {rel}")
++                protected.add(p)
++                continue
++            try:
++                self.to_array += path.stat().st_size
++            except OSError:
++                continue
++            log.info(f"[{'MOVE' if self.run_mode else 'PLAN:'} -> ARRAY] {rel}")
++            candidates.append(p)
++        if not candidates:
++            return
++        log.info(f"Cleanup: {len(candidates)} Dateien ({human(self.to_array)}) vom Cache aufs Array")
++        if not self.run_mode:
++            return
++        mover = detect_mover_bin(self.cfg)
++        if not mover:
++            log.error("Kein Unraid move-Binary gefunden (mover_bin in der Config setzen) – Cleanup übersprungen")
++            protected.update(candidates)
++            return
++        run_mover(mover, candidates, self.cfg["mover_debug_level"], log)
++        for p in candidates:
++            if Path(p).exists():
++                log.warning(f"Noch auf dem Cache (in Benutzung oder Ziel existiert bereits?): {p}")
++                protected.add(p)
++            else:
++                self.moved_back += 1
++                remove_empty_parents(Path(p).parent, loc.cache, log)
++
++    def fill(self, loc, files, sessions):
++        """On-Deck-Dateien vom Array auf den Cache – per rsync (Quelle erst nach Prüfung löschen) oder per move-Binary."""
++        rsync_args = list(self.cfg["rsync_args"])
++        from_disk = self.cfg["array_source"] == "disk"
++        min_free = float(self.cfg["min_free_percent"])
++        use_mover = self.cfg["fill_tool"] == "mover"
++        label = "MOVE" if use_mover else "COPY"
++        mover_batch = []  # (OnDeckFile, src) für fill_tool=mover
++        failures = 0
++        for f in sorted(files, key=lambda x: str(x.rel)):
++            if f.on_cache:
++                continue
++            if failures >= 3:
++                log.error("Drei rsync-Fehler in Folge – Befüllen abgebrochen, Ursache im Log prüfen")
++                break
++            if is_playing(f.rel, sessions):
++                log.info(f"[SKIP: läuft gerade] {f.rel}")
++                continue
++            share_root = loc.cache / f.rel.parts[0]
++            if not share_root.is_dir():
++                if not self.cfg["create_share_root"]:
++                    log.error(f"Share-Wurzel {share_root} fehlt. Auf ZFS-Pools zuerst als Dataset anlegen "
++                              f"(zfs create <pool>/{f.rel.parts[0]}) oder create_share_root=true setzen. Übersprungen: {f.rel}")
++                    continue
++                if self.run_mode:
++                    share_root.mkdir(parents=True, exist_ok=True)
++            check_path = share_root if share_root.is_dir() else loc.cache
++            free_after = free_percent_after(check_path, f.size)
++            if free_after < min_free:
++                log.warning(f"[SKIP: Freiplatz] {f.rel} ({human(f.size)}) – danach nur {free_after:.1f} % frei, Minimum {min_free:g} %")
++                continue
++            sources = loc.on_disk(f.rel) if from_disk else []
++            if len(sources) > 1:
++                log.warning(f"Datei liegt auf mehreren Disks (Duplikat im Array!): {', '.join(map(str, sources))} – nehme die erste")
++            src = sources[0] if sources else loc.on_array(f.rel)
++            if not src.is_file():
++                log.warning(f"Quelle nicht gefunden: {src}")
++                continue
++            self.to_cache += f.size
++            log.info(f"[{label if self.run_mode else 'PLAN:'} -> CACHE] {f.rel} ({human(f.size)}) – {f.reason}")
++            if not self.run_mode:
++                continue
++            if use_mover:
++                mover_batch.append((f, src))
++                continue
++
++            dst = loc.on_cache(f.rel)
++            dst.parent.mkdir(parents=True, exist_ok=True)
++            cmd = ["rsync", *rsync_args, str(src), str(dst)]
++            log.debug("rsync-Aufruf: " + " ".join(cmd))
++            res = subprocess.run(cmd, capture_output=True, text=True)
++            if res.returncode != 0:
++                failures += 1
++                log.error(f"rsync-Fehler (Code {res.returncode}) bei {f.rel}: {res.stderr.strip() or res.stdout.strip()}")
++                log.error("Quelle bleibt auf dem Array; Ziel prüfen, sonst liegt die Datei doppelt")
++                continue
++            failures = 0
++            try:
++                if dst.stat().st_size != src.stat().st_size:
++                    log.error(f"Grösse stimmt nicht überein nach rsync, Quelle bleibt: {f.rel}")
++                    continue
++                src.unlink()
++            except OSError as e:
++                log.error(f"Quelle konnte nicht gelöscht werden (Datei liegt jetzt doppelt!): {src} ({e})")
++                continue
++            self.copied += 1
++            f.on_cache = True
++            remove_empty_parents(src.parent, self._disk_root(src, loc, bool(sources)), log)
++
++        if mover_batch:
++            self.fill_with_mover(loc, mover_batch)
++
++    def fill_with_mover(self, loc, batch):
++        """Array -> Cache über das Unraid move-Binary (ein Aufruf für alle Dateien), danach Ergebnis prüfen."""
++        mover = detect_mover_bin(self.cfg)
++        if not mover:
++            log.error("Kein Unraid move-Binary gefunden (mover_bin in der Config setzen) – nichts kopiert")
++            return
++        log.info(f"Befüllen: {len(batch)} Dateien ({human(sum(f.size for f, _ in batch))}) per move-Binary Array -> Cache")
++        run_mover(mover, [str(src) for _, src in batch], self.cfg["mover_debug_level"], log)
++        for f, src in batch:
++            dst = loc.on_cache(f.rel)
++            if dst.exists() and not src.exists():
++                self.copied += 1
++                f.on_cache = True
++                remove_empty_parents(src.parent, self._disk_root(src, loc, src != loc.on_array(f.rel)), log)
++            elif dst.exists() and src.exists():
++                log.error(f"Datei liegt jetzt doppelt (Quelle nicht entfernt): {f.rel}")
++            else:
++                log.warning(f"Nicht auf den Cache verschoben (in Benutzung, oder das Binary kennt keinen Pool für diesen Share?): {f.rel}")
++        if self.copied == 0:
++            log.warning("Das move-Binary hat nichts auf den Cache verschoben – fill_tool=rsync verwenden oder mover_debug_level=1 setzen und Log prüfen")
++
++    @staticmethod
++    def _disk_root(src, loc, from_disk):
++        """/mnt/disk3/Filme/X/x.mkv -> /mnt/disk3; bei FUSE-Fallback array_path."""
++        if not from_disk:
++            return loc.array
++        depth = len(Path(loc.disks_glob).parts)
++        return Path(*src.parts[:depth]) if len(src.parts) > depth else loc.array
++
++    def report(self, files):
++        print(f"\n--- ON DECK ({len(files)} Dateien) ---")
++        for f in sorted(files, key=lambda x: str(x.rel)):
++            where = "CACHE" if f.on_cache else "ARRAY"
++            print(f"[{where}] {human(f.size):>10}  {f.rel}    ({f.reason})")
++        on_c = sum(x.size for x in files if x.on_cache)
++        on_a = sum(x.size for x in files if not x.on_cache)
++        print(f"\nAuf dem Cache: {human(on_c)} | Noch auf dem Array: {human(on_a)} | Gesamt: {human(on_c + on_a)}")
++        print(f"Exclude-Liste: {EXCLUDE_FILE} ({len(read_exclude())} Einträge)\n")
++
++    def execute(self):
++        cfg = self.cfg
++        log.info(f"=== EmbyCache Modus: {self.mode.upper()} ===")
++        if unraid_mover_running():
++            log.warning("Der reguläre Unraid-Mover läuft gerade – Cleanup könnte mit ihm kollidieren (nur Log-Meldungen, kein Datenrisiko)")
++
++        sessions, sessions_ok = collect_sessions(cfg, log)
++        planner = Planner(cfg)
++        files = planner.run()
++        log.info(f"On deck: {len(files)} Dateien, {human(sum(f.size for f in files))} "
++                 f"(davon {sum(1 for f in files if f.on_cache)} bereits auf dem Cache)")
++        if self.mode == "report":
++            self.report(files)
++            return 0
++
++        # Referenz-Locations (Cache/Array sind global, Mappings spielen hier keine Rolle)
++        loc = Locations(cfg, cfg["instances"][0]["_mappings"])
++        current = {str(loc.on_cache(f.rel)) for f in files}
++        protected = set()
++        exclude_written = False
++        try:
++            if planner.errors or not sessions_ok:
++                log.warning("Planung unvollständig (Emby nicht vollständig erreichbar) – Cleanup wird übersprungen, "
++                            "bisherige Exclude-Liste bleibt geschützt")
++                protected.update(p for p in read_exclude() if Path(p).exists())
++            else:
++                self.cleanup(loc, current, sessions, protected)
++            self.fill(loc, files, sessions)
++        finally:
++            if self.run_mode:
++                on_cache = {str(loc.on_cache(f.rel)) for f in files if loc.on_cache(f.rel).exists()}
++                write_exclude(on_cache | protected)
++                exclude_written = True
++        log.info(f"Statistik: -> Cache {human(self.to_cache)} ({self.copied} kopiert) | "
++                 f"-> Array {human(self.to_array)} ({self.moved_back} verschoben)"
++                 + (f" | Exclude-Liste: {len(read_exclude())} Einträge" if exclude_written else " | Dry-Run: nichts verändert"))
++        return 0
++
++
++def main():
++    parser = argparse.ArgumentParser(description="EmbyCache für Unraid", epilog="Details: siehe Kopf des Scripts")
++    parser.add_argument("--run", action="store_true", help="Aktionen wirklich ausführen (Default: Dry-Run)")
++    parser.add_argument("--show-on-deck", action="store_true", help="Nur die On-Deck-Liste anzeigen")
++    args = parser.parse_args()
++    mode = os.environ.get("EMBYCACHE_MODE", "dry").lower()
++    if args.run:
++        mode = "run"
++    elif args.show_on_deck:
++        mode = "report"
++    if mode not in ("dry", "report", "run"):
++        log.error(f"Ungültiger Modus: {mode}")
++        return 2
++
++    try:
++        cfg = load_config()
++    except ConfigError as e:
++        log.error(str(e))
++        return 1
++
++    lock = acquire_lock(log)
++    if lock is None:
++        return 1
+     try:
+-        import requests
+-        EmbyCache(runMode=args.run).run()
+-    except ImportError:
+-        print("Error: Library 'requests' missing.")
++        return Runner(cfg, mode).execute()
++    except Exception:
++        log.exception("Unerwarteter Fehler")
++        return 1
++    finally:
++        lock.close()
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/embycache_setup.py b/embycache_setup.py
+index b6776c6..1818b87 100644
+--- a/embycache_setup.py
++++ b/embycache_setup.py
+@@ -1,151 +1,176 @@
++#!/usr/bin/env python3
++"""
++EmbyCache – interaktiver Konfigurator. Legt embycache_settings.json an oder aktualisiert sie.
++
++Aufruf:  python3 embycache_setup.py
++Ort der Settings: $EMBYCACHE_CONFIG bzw. $EMBYCACHE_DIR/embycache_settings.json (Default: Script-Verzeichnis)
++
++Fragt Emby-Instanzen (URL, API-Key) ab, liest Bibliotheken und Benutzer von jeder Instanz, schlägt Host-Pfade
++für die Docker-Pfade vor und schreibt alle Systemwerte (Cache/Array-Pfade, Limits, Freiplatz).
++Alle Werte lassen sich später auch direkt in der JSON ändern; Schlüssel und Defaults stehen in embycache_lib.DEFAULTS.
++"""
++import copy
+ import json
+-import requests
+-import os
+-from pathlib import Path
++import sys
++
++from embycache_lib import CONFIG_FILE, DEFAULTS, EmbyApi, save_config
++
++# Emby-interne Pfade, die nie Medien sind
++IGNORED_PREFIXES = ("/config", "/metadata", "/transcoding-temp", "/cache", "/logs", "/var", "/boot", "/tmp")
+ 
+-# Diese Pfade werden ignoriert
+-IGNORED_PREFIXES = ["/config", "/metadata", "/transcoding-temp", "/cache", "/logs", "/var", "/boot"]
+ 
+ def ask(prompt, current):
+     res = input(f"{prompt} [{current}]: ").strip()
+-    return res if res else current
++    return res if res else str(current)
+ 
+-def get_emby_data(instances):
+-    data = {"paths": set(), "libraries": set(), "users": {}}
+-    for i, inst in enumerate(instances):
+-        url, key = inst.get("url", "").rstrip('/'), inst.get("api_key", "")
+-        if not url or not key: continue
++
++def ask_int(prompt, current):
++    while True:
++        val = ask(prompt, current)
+         try:
+-            print(f"   ...lese Instanz {i+1} ({url})...")
+-            # Bibliotheken
+-            r = requests.get(f"{url}/Library/VirtualFolders", params={"api_key": key}, timeout=5)
+-            for lib in r.json():
+-                data["libraries"].add(lib["Name"])
+-                for loc in lib.get("Locations", []):
+-                    # Filter: Systempfade ignorieren
+-                    if any(loc.startswith(prefix) for prefix in IGNORED_PREFIXES): continue
+-                    data["paths"].add(loc)
+-            # User (Nur für interne Logik, Anzeige erfolgt in Schritt 4 neu)
+-            r_u = requests.get(f"{url}/Users", params={"api_key": key}, timeout=5)
+-            for u in r_u.json():
+-                data["users"][u["Id"]] = u["Name"]
+-        except Exception as e:
+-            print(f"   WARNUNG Instanz {i+1}: {e}")
+-    return data
+-
+-def suggest_mapping(internal_path):
+-    """Versucht intelligenten Host-Pfad zu raten."""
+-    # Ersetze gängige Docker-Mount-Points durch /mnt/user
+-    prefixes = ["/data", "/media", "/mnt"]
+-    for prefix in prefixes:
+-        if internal_path.startswith(prefix):
+-            # z.B. /data/Serien -> /mnt/user/Serien
+-            # Schneide Prefix ab und hänge Rest an /mnt/user an
+-            suffix = internal_path[len(prefix):]
+-            if suffix.startswith("/"): suffix = suffix[1:]
+-            return f"/mnt/user/{suffix}"
+-    
+-    return "/mnt/user" + internal_path
++            return int(val)
++        except ValueError:
++            print("   Bitte eine ganze Zahl eingeben.")
++
++
++def suggest_mapping(internal_path, user_path):
++    """Rät den Host-Pfad: /data/Serien oder /media/Serien -> /mnt/user/Serien."""
++    for prefix in ("/data", "/media", "/mnt/user", "/mnt"):
++        if internal_path == prefix or internal_path.startswith(prefix + "/"):
++            return f"{user_path}/{internal_path[len(prefix):].lstrip('/')}".rstrip("/")
++    return f"{user_path}{internal_path}"
++
++
++def read_instance(inst, timeout):
++    """Bibliotheken (Name -> Docker-Pfade) und Benutzer (Id -> Name) einer Instanz."""
++    api = EmbyApi(inst["url"], inst["api_key"], timeout)
++    libs, users = {}, {}
++    for lib in api.get("/Library/VirtualFolders") or []:
++        locs = [l for l in lib.get("Locations", []) if not l.startswith(IGNORED_PREFIXES)]
++        if locs:
++            libs[lib["Name"]] = locs
++    for u in api.get("/Users") or []:
++        users[u["Id"]] = u.get("Name", u["Id"])
++    return libs, users
++
+ 
+ def setup():
+-    cfg_p = Path("embycache_settings.json")
+     cfg = {}
+-    if cfg_p.exists():
+-        try: cfg = json.loads(cfg_p.read_text(encoding="utf-8"))
+-        except: cfg = {}
+-
+-    # Defaults
+-    cfg.setdefault("instances", [{"url": "http://10.87.100.200:8096", "api_key": ""}])
+-    cfg.setdefault("path_mappings", {})
+-    cfg.setdefault("libraries", [])
+-    cfg.setdefault("valid_users", [])
+-    cfg.setdefault("cache_path", "/mnt/cache")
+-    cfg.setdefault("array_path", "/mnt/user0")
+-    cfg.setdefault("number_episodes", 3)
+-    cfg.setdefault("min_free_percent", 10)
++    if CONFIG_FILE.exists():
++        try:
++            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
++            print(f"Bestehende Konfiguration geladen: {CONFIG_FILE}")
++        except json.JSONDecodeError as e:
++            print(f"WARNUNG: {CONFIG_FILE} ist kein gültiges JSON ({e}) – wird neu erstellt.")
++    for key, val in DEFAULTS.items():
++        cfg.setdefault(key, copy.deepcopy(val))
+ 
+     print("\n--- 1. Emby Server ---")
+-    count = int(ask("Anzahl Instanzen", len(cfg["instances"])))
+-    while len(cfg["instances"]) < count: cfg["instances"].append({"url": "http://IP:8096", "api_key": ""})
++    if not cfg["instances"]:
++        cfg["instances"] = [{"servername": "Emby", "url": "http://IP:8096", "api_key": ""}]
++    count = ask_int("Anzahl Instanzen", len(cfg["instances"]))
++    while len(cfg["instances"]) < count:
++        cfg["instances"].append({"servername": f"Emby{len(cfg['instances']) + 1}", "url": "http://IP:8096", "api_key": ""})
+     cfg["instances"] = cfg["instances"][:count]
+-    for i, inst in enumerate(cfg["instances"]):
+-        print(f"   Server {i+1}:")
+-        inst["url"] = ask("   URL", inst["url"])
+-        inst["api_key"] = ask("   API Key", inst["api_key"])
+-
+-    print("\n--- Lade Daten... ---")
+-    emby_data = get_emby_data(cfg["instances"])
+-
+-    print("\n--- 2. Pfad-Mapping (Pro Ordner) ---")
+-    found_paths = sorted(list(emby_data["paths"]))
+-    mappings = cfg.get("path_mappings", {})
+-    
+-    if found_paths:
+-        print(f"   Gefunden: {len(found_paths)} Ordner.")
+-        print("   Bitte bestätige den Host-Pfad für JEDEN Ordner:")
+-        
+-        new_mappings = {}
+-        for p in found_paths:
+-            # Bestehendes Mapping oder intelligenter Vorschlag
+-            current = mappings.get(p, suggest_mapping(p))
+-            val = ask(f"   Host-Pfad für '{p}'", current)
+-            new_mappings[p] = val
+-        
+-        cfg["path_mappings"] = new_mappings
+-    else:
+-        print("   (Keine Medien-Pfade gefunden)")
+-
+-    print("\n--- 3. Bibliotheken ---")
+-    avail = sorted(list(emby_data["libraries"]))
+-    print(f"   Gefunden: {', '.join(avail)}")
+-    cur_libs = ", ".join(cfg["libraries"]) if cfg["libraries"] else ", ".join(avail)
+-    res = ask("   Welche überwachen? (Komma)", cur_libs)
++    for i, inst in enumerate(cfg["instances"], 1):
++        print(f"   Server {i}:")
++        inst["servername"] = ask("   Name", inst.get("servername", f"Emby{i}"))
++        inst["url"] = ask("   URL", inst.get("url", "")).rstrip("/")
++        inst["api_key"] = ask("   API Key", inst.get("api_key", ""))
++
++    print("\n--- Lade Daten von den Instanzen ---")
++    data = {}
++    for inst in cfg["instances"]:
++        try:
++            data[inst["servername"]] = read_instance(inst, cfg["api_timeout"])
++            libs, users = data[inst["servername"]]
++            print(f"   {inst['servername']}: {len(libs)} Bibliotheken, {len(users)} Benutzer")
++        except RuntimeError as e:
++            print(f"   WARNUNG {inst['servername']}: {e}")
++            data[inst["servername"]] = ({}, {})
++
++    print("\n--- 2. Bibliotheken ---")
++    all_libs = sorted({name for libs, _ in data.values() for name in libs})
++    print(f"   Gefunden: {', '.join(all_libs) or '(keine)'}")
++    current = ", ".join(cfg["libraries"]) if cfg["libraries"] else ", ".join(all_libs)
++    res = ask("   Welche cachen? (Komma-getrennt)", current)
+     cfg["libraries"] = [l.strip() for l in res.split(",") if l.strip()]
+ 
+-    # --- 4. BENUTZER (ANGEPASST MIT SERVER-SPALTE) ---
++    print("\n--- 3. Pfad-Mapping (Docker-Pfad -> Host-Pfad) ---")
++    print("   Nur Pfade der gewählten Bibliotheken; alles andere fasst das Script nie an.")
++    old_global = cfg.get("path_mappings", {})
++    for inst in cfg["instances"]:
++        libs, _ = data[inst["servername"]]
++        paths = sorted({p for name, locs in libs.items() if name in cfg["libraries"] for p in locs})
++        if not paths:
++            print(f"   {inst['servername']}: keine Medienpfade gefunden")
++            continue
++        old = dict(old_global)
++        old.update(inst.get("path_mappings") or {})
++        new = {}
++        print(f"   {inst['servername']}:")
++        for p in paths:
++            new[p] = ask(f"     Host-Pfad für '{p}'", old.get(p, suggest_mapping(p, cfg["user_path"]))).rstrip("/")
++        inst["path_mappings"] = new
++    cfg["path_mappings"] = {}  # Mappings liegen jetzt pro Instanz
++
+     print("\n--- 4. Benutzer ---")
+-    # Header
+-    print(f"   {'ID':<32} | {'SERVER':<15} | {'NAME'}")
++    print(f"   {'ID':<34} | {'SERVER':<15} | NAME")
+     print("   " + "-" * 70)
+-
+-    # Wir iterieren hier erneut über die Instanzen, um die Server-Zuordnung für die Anzeige zu haben
+     for inst in cfg["instances"]:
+-        url = inst.get("url", "").rstrip('/')
+-        key = inst.get("api_key", "")
+-        if not url or not key: continue
+-
+-        # Server-Name generieren (aus IP/URL)
+-        try:
+-            srv_name = url.replace("http://", "").replace("https://", "").split(":")[0]
+-            if len(srv_name) > 15: srv_name = srv_name[:13] + ".."
+-        except: srv_name = "Server"
+-
+-        try:
+-            r = requests.get(f"{url}/Users", params={"api_key": key}, timeout=3)
+-            if r.status_code == 200:
+-                for u in r.json():
+-                    print(f"   {u['Id']:<32} | {srv_name:<15} | {u['Name']}")
+-            else:
+-                print(f"   {'---':<32} | {srv_name:<15} | (Fehler: {r.status_code})")
+-        except:
+-            print(f"   {'---':<32} | {srv_name:<15} | (Offline)")
+-
++        _, users = data[inst["servername"]]
++        for uid, name in users.items():
++            print(f"   {uid:<34} | {inst['servername'][:15]:<15} | {name}")
+     print("   " + "-" * 70)
+-    print("   Hinweis: Mehrere IDs können durch Komma getrennt werden (z.B. id1,id2).")
+-
+-    cur_usr = ", ".join(cfg["valid_users"])
+-    res = ask("   User-IDs (Leer = Alle)", cur_usr)
+-    
+-    # Input am Komma splitten und säubern
+-    cfg["valid_users"] = [u.strip() for u in res.split(",") if u.strip()]
++    print("   Mehrere IDs mit Komma trennen. Leer = alle Benutzer aller Instanzen.")
++    vu = cfg["valid_users"]
++    old_budgets = {k: (v or {}).get("budget", "") for k, v in vu.items()} if isinstance(vu, dict) else {}
++    current = ", ".join(vu.keys() if isinstance(vu, dict) else vu)
++    res = ask("   User-IDs", current)
++    ids = [u.strip() for u in res.split(",") if u.strip()]
++    cfg["valid_users"] = ids
+ 
+     print("\n--- 5. System ---")
+-    cfg["cache_path"] = ask("   Cache Pfad", cfg["cache_path"])
+-    cfg["array_path"] = ask("   Array Pfad", cfg["array_path"])
+-    cfg["number_episodes"] = int(ask("   Anzahl Folgen", cfg["number_episodes"]))
+-    cfg["min_free_percent"] = int(ask("   Min % Frei", cfg["min_free_percent"]))
+-
+-    with open(cfg_p, "w", encoding="utf-8") as f: json.dump(cfg, f, indent=4)
+-    print("\n✔ Fertig.")
+-
+-if __name__ == "__main__": setup()
++    cfg["cache_path"] = ask("   Cache-Pool (z.B. /mnt/cache oder /mnt/master)", cfg["cache_path"]).rstrip("/")
++    cfg["array_path"] = ask("   Array-Sicht ohne Pools", cfg["array_path"]).rstrip("/")
++    cfg["user_path"] = ask("   User-Share-Sicht", cfg["user_path"]).rstrip("/")
++    cfg["array_disks_glob"] = ask("   Glob für die Array-Disks", cfg["array_disks_glob"])
++    print("\n--- 6. Umfang: Zähl- oder Budget-Modus ---")
++    print("   Budget-Modus: Gesamtgrösse (z.B. 2.5T) wird fair auf die aktiven Benutzer verteilt,")
++    print("   Filme/Serien nach Bytes gefüllt, Serien reihum eine Folge pro Runde. Leer = Zähl-Modus.")
++    cfg["cache_budget"] = ask("   Cache-Budget gesamt (z.B. 2.5T; '-' = Zähl-Modus)", cfg["cache_budget"] or "-").strip()
++    if cfg["cache_budget"] in ("-", "0"):
++        cfg["cache_budget"] = ""
++    if cfg["cache_budget"]:
++        cfg["movie_share_percent"] = ask_int("   Anteil Filme am Benutzer-Budget in % (weich)", int(cfg["movie_share_percent"]))
++        cfg["max_episodes_per_series"] = ask_int("   Folgen pro Serie höchstens (0 = das Budget entscheidet)", cfg["max_episodes_per_series"])
++        if ids:
++            print("   Festes Budget für einzelne Benutzer? Format id=300G, mehrere mit Komma; leer = fair verteilen.")
++            current = ", ".join(f"{k}={v}" for k, v in old_budgets.items() if v and k in ids)
++            res = ask("   Benutzer-Budgets", current)
++            budgets = {}
++            for part in res.split(","):
++                if "=" in part:
++                    k, v = part.split("=", 1)
++                    if k.strip() in ids and v.strip():
++                        budgets[k.strip()] = v.strip()
++            if budgets:
++                cfg["valid_users"] = {u: ({"budget": budgets[u]} if u in budgets else {}) for u in ids}
++    else:
++        cfg["number_episodes"] = ask_int("   Folgen vorladen (nach der aktuellen)", cfg["number_episodes"])
++    cfg["max_resume_items"] = ask_int("   Max. Weiterschauen-Einträge pro Benutzer", cfg["max_resume_items"])
++    cfg["max_favorite_series"] = ask_int("   Max. Favoriten-Serien pro Benutzer (0 = aus)", cfg["max_favorite_series"])
++    cfg["min_free_percent"] = ask_int("   Mindestens frei auf dem Cache in % (ZFS: 20 ist sinnvoll)", cfg["min_free_percent"])
++    cfg["movie_mode"] = ask("   Filme: 'folder' = ganzer Filmordner, 'file' = nur gleichnamige Dateien", cfg["movie_mode"])
++
++    save_config(cfg)
++    print(f"\n✔ Gespeichert: {CONFIG_FILE}")
++    print("  Nächster Schritt: python3 embycache_run.py --show-on-deck")
++
++
++if __name__ == "__main__":
++    try:
++        setup()
++    except (KeyboardInterrupt, EOFError):
++        print("\nAbgebrochen, nichts gespeichert.")
++        sys.exit(1)
+-- 
+2.43.0
+
