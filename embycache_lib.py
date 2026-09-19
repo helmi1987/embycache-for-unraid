@@ -27,6 +27,8 @@ import urllib.request
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+__version__ = "7.2.1 (2026-09-19)"
+
 BASE_DIR = Path(os.environ.get("EMBYCACHE_DIR") or Path(__file__).resolve().parent)
 CONFIG_FILE = Path(os.environ.get("EMBYCACHE_CONFIG") or (BASE_DIR / "embycache_settings.json"))
 EXCLUDE_FILE = BASE_DIR / "embycache_exclude.txt"
@@ -53,6 +55,7 @@ DEFAULTS = {
     "max_episodes_per_series": 0,        # Budget-Modus: Folgen pro Serie höchstens (0 = das Budget entscheidet)
     "max_resume_items": 10,              # Wie viele "Weiterschauen"-Einträge pro Benutzer berücksichtigt werden
     "max_favorite_series": 10,           # Wie viele Favoriten-Serien pro Benutzer (0 = keine Favoriten)
+    "use_next_up": True,                 # Auch Embys «Als Nächstes» (/Shows/NextUp) als Quelle – hält Serien zwischen zwei Folgen im Cache
     "min_free_percent": 20,              # Unter diesem Freiplatz (Prozent) wird nichts mehr auf den Cache kopiert
     "movie_mode": "folder",              # folder = ganzer Filmordner mitnehmen, file = nur Dateien mit gleichem Namen
     "create_share_root": False,          # Share-Wurzel auf dem Pool automatisch anlegen (ZFS: besser vorher als Dataset!)
@@ -60,7 +63,10 @@ DEFAULTS = {
     "mover_debug_level": 0,              # Parameter -d für das move-Binary (0 = still, 1..3 = ausführlicher)
     "rsync_args": ["-aAX", "--numeric-ids"],  # Vollständige rsync-Optionen (Default = wie das Original)
     "fill_tool": "rsync",                # Array -> Cache: rsync (kopieren + Quelle löschen) oder mover (Unraid move-Binary)
+    "cleanup_tool": "mover",             # Cache -> Array: mover (Unraid move-Binary, wie das Original) oder rsync
+                                         #   (rsync /mnt/<pool>/<rel> -> /mnt/user0/<rel>, unabhängig von der Mover-Richtung des Shares)
     "api_timeout": 10,                   # Sekunden pro API-Aufruf
+    "shares_cfg_dir": "/boot/config/shares",  # Unraid Share-Konfigurationen (für die Mover-Richtungs-Prüfung)
 }
 
 
@@ -189,6 +195,11 @@ def load_config(require_paths=True):
         raise ConfigError("movie_mode muss 'folder' oder 'file' sein")
     if cfg["fill_tool"] not in ("rsync", "mover"):
         raise ConfigError("fill_tool muss 'rsync' oder 'mover' sein")
+    env_cleanup = os.environ.get("EMBYCACHE_CLEANUP_TOOL")
+    if env_cleanup:
+        cfg["cleanup_tool"] = env_cleanup.lower()
+    if cfg["cleanup_tool"] not in ("rsync", "mover"):
+        raise ConfigError("cleanup_tool muss 'rsync' oder 'mover' sein")
     if cfg["array_source"] not in ("user0", "disk"):
         raise ConfigError("array_source muss 'user0' oder 'disk' sein")
     if not cfg["rsync_args"]:
@@ -325,15 +336,74 @@ def remove_empty_parents(path, stop_root, log, min_depth=2):
         p = p.parent
 
 
-def free_percent_after(path, size):
-    """Freiplatz in Prozent, nachdem `size` Bytes geschrieben wären (bei ZFS-Quota zählt die Quota)."""
+def free_percent_after(path, size, simulated_delta=0):
+    """Freiplatz in Prozent, nachdem `size` Bytes geschrieben wären (bei ZFS-Quota zählt die Quota).
+    simulated_delta: im Dry-Run der noch nicht ausgeführte Platzgewinn (Cleanup) minus geplante Kopien,
+    damit der Dry-Run denselben Füllstand sieht wie der scharfe Lauf an dieser Stelle."""
     u = shutil.disk_usage(path)
     if u.total == 0:
         return 0.0
-    return max(0.0, (u.free - size) / u.total * 100.0)
+    return max(0.0, (u.free + simulated_delta - size) / u.total * 100.0)
 
 
 # --------------------------------------------------------------------------- Mover
+def _read_share_cfg(path):
+    """Gibt {key: value} für shareUseCache/shareCachePool/shareCachePool2 zurück oder None, wenn nicht lesbar."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    vals = {}
+    for line in text.splitlines():
+        line = line.strip()
+        for key in ("shareUseCache", "shareCachePool", "shareCachePool2"):
+            if line.startswith(key + "="):
+                vals[key] = line.split("=", 1)[1].strip().strip('"')
+    return vals
+
+
+def share_mover_mode(cfg, share):
+    """Mover-Einstellung eines Shares: (mode, primary, secondary, quelle).
+    mode = yes | prefer | only | no | None (nichts gefunden). Quelle = Share-Cfg, Standardwerte oder ''."""
+    cfg_dir = Path(cfg["shares_cfg_dir"])
+    share_cfg = cfg_dir / f"{share}.cfg"
+    vals = _read_share_cfg(share_cfg)
+    source = str(share_cfg)
+    if not vals or "shareUseCache" not in vals:
+        defaults = _read_share_cfg(cfg_dir.parent / "share.cfg")  # /boot/config/share.cfg = Standardwerte neuer Shares
+        if defaults and "shareUseCache" in defaults:
+            vals = defaults
+            source = f"Standardwerte {cfg_dir.parent / 'share.cfg'} (keine {share}.cfg vorhanden)"
+        else:
+            return None, None, None, ""
+    mode = (vals.get("shareUseCache") or "").lower() or None
+    primary = vals.get("shareCachePool") or "cache"
+    secondary = vals.get("shareCachePool2") or ("array" if mode in ("yes", "prefer") else "keines")
+    return mode, primary, secondary, source
+
+
+MOVER_MODE_HINT = {
+    "yes": "Mover Cache → Array – Cleanup über das move-Binary funktioniert",
+    "prefer": "Mover Array → Cache: das move-Binary schiebt Dateien dieses Shares immer Richtung Cache – "
+              "Cleanup Cache → Array ist damit unmöglich (Share auf «Cache: Yes» stellen)",
+    "only": "Cache only: das move-Binary kennt kein Array-Ziel für diesen Share – Cleanup unmöglich",
+    "no": "Array only: der reguläre Mover fasst den Share nicht an; ob das move-Binary Pool-Pfade trotzdem "
+          "aufs Array schiebt, ist ungetestet – ersten Lauf mit mover_debug_level 1 prüfen",
+    None: "keine Share-Konfiguration gefunden – Mover-Richtung unbekannt, Cleanup wird versucht",
+}
+
+
+def summarize_mover_output(stdout, paths):
+    """Ordnet jeder Datei die Mover-Meldung zu (z.B. 'No space left on device'); {path: message}."""
+    result = {}
+    for line in stdout.splitlines():
+        for p in paths:
+            if p in line and p not in result:
+                msg = line.split(p, 1)[1].strip(" :-")
+                result[p] = msg or line.strip()
+    return result
+
+
 def detect_mover_bin(cfg):
     if cfg.get("mover_bin"):
         return cfg["mover_bin"]
@@ -364,9 +434,9 @@ def run_mover(mover_bin, paths, debug_level, log):
         log.error(f"move-Binary konnte nicht gestartet werden ({mover_bin}): {e}")
         return 1, "", str(e)
     for line in proc.stdout.splitlines():
-        log.info(f"mover: {line}")
+        log.debug(f"mover: {line}")
     for line in proc.stderr.splitlines():
-        log.warning(f"mover: {line}")
+        log.debug(f"mover: {line}")
     if proc.returncode != 0:
         log.error(f"move-Binary endete mit Code {proc.returncode}")
     return proc.returncode, proc.stdout, proc.stderr
