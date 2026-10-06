@@ -167,6 +167,8 @@ Pro Benutzer zuerst die Filme, dann jede Serie als Block mit ihren Folgen in Rei
 
 **Wird mein laufender Film unterbrochen?** Nein. Laufende Wiedergaben werden über `/Sessions` erkannt und weder kopiert noch zurückgeschoben. Wenn Sessions nicht abrufbar sind, wird nichts vom Cache entfernt.
 
+**Wo sind die Logs?** `logs/embycache.log` und `logs/embycache_cleaner.log`, mit vollständigen Pfaden. `EMBYCACHE_LOG_LEVEL=DEBUG` zeigt zusätzlich die Mover-Aufrufe.
+
 ## Lizenz
 
 Copyright (C) 2025–2026 helmi1987
@@ -179,5 +181,3 @@ Es wird in der Hoffnung verbreitet, dass es nützlich ist, aber **ohne jede
 Garantie** – sogar ohne die implizite Garantie der Marktreife oder der Eignung
 für einen bestimmten Zweck. Details stehen in der Datei [LICENSE](LICENSE)
 (GNU GPL v3, SPDX: `GPL-3.0-or-later`).
-
-**Wo sind die Logs?** `logs/embycache.log` und `logs/embycache_cleaner.log`, mit vollständigen Pfaden. `EMBYCACHE_LOG_LEVEL=DEBUG` zeigt zusätzlich die Mover-Aufrufe.
