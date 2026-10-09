@@ -63,7 +63,7 @@ from pathlib import Path
 from embycache_lib import (
     ConfigError, EmbyApi, Locations, Status, acquire_lock, format_status, collect_sessions, detect_mover_bin, free_percent_after,
     human, is_playing, load_config, read_exclude, remove_empty_parents, run_mover, run_rsync, setup_logging,
-    share_mover_mode, summarize_mover_output, unraid_mover_running, write_exclude, EXCLUDE_FILE, MOVER_MODE_HINT,
+    share_mode_ok, summarize_mover_output, unraid_mover_running, write_exclude, EXCLUDE_FILE,
     __version__,
 )
 
@@ -386,7 +386,7 @@ class Planner:
         share = float(self.cfg["movie_share_percent"]) / 100.0
         user_budgets = self.cfg["user_budgets"]
         active = [u for u in self.users.values() if u.has_candidates()]
-        explicit = {u.key: user_budgets[u.key.split(":", 1)[1]] for u in active if u.key.split(":", 1)[1] in user_budgets}
+        explicit = {u.key: user_budgets[u.uid] for u in active if u.uid in user_budgets}
         pool = total - sum(explicit.values())
         if pool < 0:
             log.warning(f"Feste Benutzer-Budgets ({human(sum(explicit.values()))}) übersteigen cache_budget ({human(total)})")
@@ -469,28 +469,6 @@ class Runner:
         self._lock = threading.Lock()  # Zähler und Löschen/Ordner-Aufräumen bei parallelen Kopien
         self.status = Status(mode, log, enabled=self.run_mode, log_interval=cfg["status_log_interval"])
 
-    def share_mode_ok(self, share, checked):
-        """Prüft einmal pro Share, ob das move-Binary Cache → Array kann, und schreibt das Ergebnis ins Log."""
-        if share in checked:
-            return checked[share]
-        if self.cfg["cleanup_tool"] == "rsync":
-            checked[share] = True  # rsync nach /mnt/user0 ist von der Mover-Richtung unabhängig
-            return True
-        mode, primary, secondary, source = share_mover_mode(self.cfg, share)
-        where = f"Primary {primary}, Secondary {secondary}; aus {source}" if mode else "keine Konfiguration gefunden"
-        hint = MOVER_MODE_HINT.get(mode, f"unbekannter Wert «{mode}»")
-        if mode == "yes":
-            log.info(f"Share «{share}»: shareUseCache=yes ({where}) – {hint}")
-            checked[share] = True
-        elif mode is None or mode == "no":
-            log.warning(f"Share «{share}»: shareUseCache={mode or '?'} ({where}) – {hint}")
-            checked[share] = True
-        else:
-            log.error(f"Share «{share}»: shareUseCache={mode} ({where}) – {hint}. "
-                      f"Cleanup für diesen Share übersprungen (Alternative: cleanup_tool=rsync).")
-            checked[share] = False
-        return checked[share]
-
     def cleanup_with_rsync(self, loc, candidates, listing, protected):
         """Cache -> Array per rsync nach /mnt/user0 (shfs wählt die Disk), Quelle erst nach Prüfung löschen."""
         sizes = {str(loc.cache / r): sz for r, sz in listing}
@@ -558,7 +536,7 @@ class Runner:
                 log.info(f"[BLEIBT: läuft gerade] {rel}")
                 protected.add(p)
                 continue
-            if not self.share_mode_ok(rel.parts[0], checked):
+            if not share_mode_ok(self.cfg, rel.parts[0], checked, log):
                 protected.add(p)  # bleibt geschützt, bis die Share-Einstellung stimmt
                 continue
             try:
@@ -599,7 +577,7 @@ class Runner:
                 left_by_reason.setdefault(reason, []).append(p)
             else:
                 self.moved_back += 1
-                self.moved_back_bytes += next((sz for r, sz in listing if str(loc.cache / r) == p), 0)
+                self.moved_back_bytes += sizes.get(p, 0)
                 remove_empty_parents(Path(p).parent, loc.cache, log)
         for reason, paths in left_by_reason.items():
             log.warning(f"{len(paths)} Dateien nicht verschoben – Mover: {reason}")
@@ -821,6 +799,7 @@ class Runner:
         def monitor():
             pending = list(enumerate(items, 1))
             current = None
+            skipped = set()  # schon als Fehler gezählt
             last_done = 0
             t_current = time.time()
             while True:
@@ -841,13 +820,24 @@ class Runner:
                         current = None
                     last_done = max(last_done, i)
                 pending = still
-                if finished or not pending:
+                if finished:
+                    # vom Binary liegengelassen (in Benutzung, Ziel voll …) – im Status als Fehler zählen
+                    for i, (src, rel, size, targets) in pending:
+                        key = f"m{i}"
+                        if key in skipped:
+                            continue
+                        if current != key:
+                            self.status.job_start(key, rel, "move", size, i)
+                        self.status.job_end(key, False)
+                    break
+                if not pending:
                     break
                 # aktuelle Datei = erste noch vorhandene nach der zuletzt fertigen (übersprungene bleiben zurück)
                 i, (src, rel, size, targets) = next((x for x in pending if x[0] > last_done), pending[0])
                 key = f"m{i}"
                 if current != key:
                     if current:
+                        skipped.add(current)
                         self.status.job_end(current, False)  # übersprungen (in Benutzung o.ä.) – Endergebnis prüft unten
                     current, t_current = key, time.time()
                     self.status.job_start(key, rel, "move", size, i)
@@ -975,7 +965,6 @@ class Runner:
         loc = Locations(cfg, cfg["instances"][0]["_mappings"])
         current = {str(loc.on_cache(f.rel)) for f in files}
         protected = set()
-        exclude_written = False
         try:
             if planner.errors or not sessions_ok:
                 log.warning("Planung unvollständig (Emby nicht vollständig erreichbar) – Cleanup wird übersprungen, "
@@ -988,7 +977,6 @@ class Runner:
             if self.run_mode:
                 on_cache = {str(loc.on_cache(f.rel)) for f in files if loc.on_cache(f.rel).exists()}
                 write_exclude(on_cache | protected)
-                exclude_written = True
         if self.run_mode:
             excl = read_exclude()
             log.info(f"Ergebnis Cleanup:  {self.moved_back} von {self.cleanup_planned} Dateien aufs Array verschoben "
@@ -1013,6 +1001,8 @@ def main():
     parser.add_argument("--watch", type=float, nargs="?", const=2, metavar="SEK",
                         help="mit --status: alle SEK Sekunden neu anzeigen (Default 2), Ende mit Ctrl+C")
     args = parser.parse_args()
+    if args.watch is not None and args.watch <= 0:
+        parser.error("--watch braucht ein Intervall grösser als 0 Sekunden")
     if args.watch and not args.status:
         parser.error("--watch nur zusammen mit --status (in einer zweiten Shell, während --run läuft)")
     if args.status:

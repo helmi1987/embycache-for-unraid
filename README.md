@@ -68,13 +68,14 @@ Alle Pfade sind relativ zum **Script-Verzeichnis**, nicht zum Arbeitsverzeichnis
         }
     ],
     "path_mappings": {},                   // optional: globales Mapping für alle Instanzen
+    "libraries": [],                       // nur informativ (Wizard); gefiltert wird über path_mappings
 
     "valid_users": [],                     // User-IDs; leer = alle Benutzer (auch Dict {id: {...}} wird akzeptiert)
     "number_episodes": 3,                  // Zähl-Modus: Folgen nach der aktuellen vorladen
     "cache_budget": "",                    // Budget-Modus: z.B. "2.5T" – leer = Zähl-Modus
     "movie_share_percent": 50,             // Budget-Modus: Anteil Filme am Benutzer-Budget (weich, nach Bytes)
     "max_episodes_per_series": 0,          // Budget-Modus: Folgen pro Serie höchstens (0 = das Budget entscheidet)
-    "max_resume_items": 10,                // Weiterschauen-Einträge pro Benutzer
+    "max_resume_items": 10,                // Weiterschauen-Einträge pro Benutzer (gilt auch als Limit für «Als Nächstes»)
     "max_favorite_series": 10,             // Favoriten-Serien pro Benutzer (0 = aus)
     "use_next_up": true,                   // Embys «Als Nächstes» als Quelle (fertige Folge, nächste noch nicht gestartet)
     "min_free_percent": 20,                // darunter wird nichts mehr kopiert (ZFS: nicht unter 15–20 gehen)
@@ -105,8 +106,9 @@ python3 embycache_run.py --status --watch  # alle 2 s neu (--watch 5 = alle 5 s)
 
 ```
 EmbyCache 7.3.0 – Status: läuft, PID 930, Modus RUN
+Start 2026-10-09 03:00:01, letzte Aktualisierung 2026-10-09 03:01:12
 Phase: Befüllen (Array -> Cache)  –  3/6 Dateien, 10.73 GB von 17.17 GB (62 %)
-Aktiv (3):
+Aktiv (2):
   [3/6] disk1     25 %   732.42 MB / 2.86 GB   180.00MB/s  Rest 0:00:12  Serien/Show1/E3.mkv
   [5/6] disk2     25 %   732.42 MB / 2.86 GB   175.00MB/s  Rest 0:00:13  Serien/Show2/E2.mkv
 Zuletzt fertig:
@@ -151,7 +153,7 @@ Filme: Liegt der Film in einem eigenen Ordner, wird der ganze Ordner mitgenommen
 | `python3 embycache_run.py --run` | Scharf |
 | `python3 embycache_run.py --status [--watch [SEK]]` | Live-Status des laufenden bzw. letzten Laufs (aus `embycache_status.json`) |
 | `python3 embycache_cleaner.py` | Waisen auf dem Cache anzeigen |
-| `python3 embycache_cleaner.py --run` | Waisen aufs Array verschieben |
+| `python3 embycache_cleaner.py --run` | Waisen aufs Array verschieben – per `cleanup_tool` (mover oder rsync), mit derselben Prüfung der Mover-Richtung wie das Hauptscript |
 | `python3 embycache_cleaner.py --add-to-list` | Waisen in die Exclude-Liste aufnehmen |
 
 Umgebungsvariablen: `EMBYCACHE_MODE` (dry / report / run), `EMBYCACHE_DIR`, `EMBYCACHE_CONFIG`, `EMBYCACHE_LOG_LEVEL`, `EMBYCACHE_MIN_FREE_PERCENT`, `EMBYCACHE_MOVER_DEBUG`, `EMBYCACHE_RSYNC_ARGS`, `EMBYCACHE_FILL_TOOL`, `EMBYCACHE_CLEANUP_TOOL`, `EMBYCACHE_CACHE_BUDGET`, `EMBYCACHE_REPORT_USER`, `EMBYCACHE_PARALLEL_PER_DISK`, `EMBYCACHE_PARALLEL_TOTAL`, `EMBYCACHE_STATUS_LOG_INTERVAL`. Der Hilfetext im Kopf jedes Scripts beschreibt sie.
@@ -189,7 +191,7 @@ Pro Benutzer zuerst die Filme, dann jede Serie als Block mit ihren Folgen in Rei
 
 **Kopieren und Mover wie im Original.** Mit den Defaults sind die beiden Aufrufe identisch mit der seit über einem Jahr produktiven Version: `rsync -aAX --numeric-ids /mnt/user0/<Datei> /mnt/<pool>/<Datei>` pro Datei, danach `unlink` der Quelle; Cache → Array über `/usr/libexec/unraid/move` (sonst `/usr/local/sbin/move`, `/usr/local/bin/move`) mit den Cache-Pfaden zeilenweise auf stdin, ohne `-d`, solange `mover_debug_level` 0 ist. Neu ist nur, was *nach* dem Aufruf passiert: Exit-Code und stderr werden geloggt, die Grösse wird vor dem Löschen verglichen, und nach dem Mover wird geprüft, was noch auf dem Cache liegt. `EMBYCACHE_LOG_LEVEL=DEBUG` zeigt jeden Aufruf wörtlich.
 
-**Array → Cache über den Unraid-Mover (`fill_tool: mover`).** Der Stock-Mover bringt Dateien von «prefer»-Shares mit `find /mnt/user0/<share> | move` auf den Pool; das Script übergibt dem Binary dieselben Pfade (bevorzugt den echten `/mnt/diskN`-Pfad). Welchen Pool das Binary nimmt, steht in der Share-Konfiguration – für einen Share auf *Array only* gibt es keinen, dann bleibt die Datei liegen und das Script meldet es. Deshalb: mit `mover_debug_level: 1` und einer einzelnen Datei testen, bevor du umstellst. Vorteil gegenüber rsync: fuser-Check und keine doppelte Datei bei Abbruch; der Cleanup (Cache → Array) läuft immer über das Binary.
+**Array → Cache über den Unraid-Mover (`fill_tool: mover`).** Der Stock-Mover bringt Dateien von «prefer»-Shares mit `find /mnt/user0/<share> | move` auf den Pool; das Script übergibt dem Binary dieselben Pfade (bevorzugt den echten `/mnt/diskN`-Pfad). Welchen Pool das Binary nimmt, steht in der Share-Konfiguration – für einen Share auf *Array only* gibt es keinen, dann bleibt die Datei liegen und das Script meldet es. Deshalb: mit `mover_debug_level: 1` und einer einzelnen Datei testen, bevor du umstellst. Vorteil gegenüber rsync: fuser-Check und keine doppelte Datei bei Abbruch. Der Cleanup (Cache → Array) richtet sich unabhängig davon nach `cleanup_tool`.
 
 **Emby-Mounts.** Emby muss die Medien über `/mnt/user/...` sehen (nicht `/mnt/user0` oder `/mnt/diskN`), sonst bricht der transparente Wechsel zwischen Pool und Array.
 

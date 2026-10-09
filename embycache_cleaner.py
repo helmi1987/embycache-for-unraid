@@ -2,14 +2,16 @@
 """
 EmbyCache Cleaner – findet Dateien auf dem Cache in den gecachten Bibliotheksordnern, die NICHT in der
 Exclude-Liste stehen (Waisen: z.B. nach einem abgebrochenen Lauf oder manuell kopiert), und schiebt sie
-auf Wunsch per Unraid move-Binary aufs Array oder nimmt sie in die Exclude-Liste auf.
+auf Wunsch aufs Array oder nimmt sie in die Exclude-Liste auf. Werkzeug wie im Hauptscript per cleanup_tool:
+mover (Default, Unraid move-Binary – Shares mit Mover-Richtung Array -> Cache werden übersprungen) oder rsync.
 
 Aufruf:
   python3 embycache_cleaner.py                Dry-Run: listet die Waisen
-  python3 embycache_cleaner.py --run          Waisen aufs Array verschieben (move-Binary)
+  python3 embycache_cleaner.py --run          Waisen aufs Array verschieben (cleanup_tool: mover oder rsync)
   python3 embycache_cleaner.py --add-to-list  Waisen in die Exclude-Liste aufnehmen (bleiben auf dem Cache)
 
-Umgebungsvariablen: EMBYCACHE_DIR, EMBYCACHE_CONFIG, EMBYCACHE_LOG_LEVEL, EMBYCACHE_MOVER_DEBUG (siehe embycache_lib.py)
+Umgebungsvariablen: EMBYCACHE_DIR, EMBYCACHE_CONFIG, EMBYCACHE_LOG_LEVEL, EMBYCACHE_MOVER_DEBUG, EMBYCACHE_CLEANUP_TOOL,
+EMBYCACHE_RSYNC_ARGS (siehe embycache_lib.py bzw. embycache_run.py)
 Gerade abgespielte Dateien werden nie verschoben.
 """
 import argparse
@@ -18,7 +20,7 @@ from pathlib import Path
 
 from embycache_lib import (
     ConfigError, Locations, acquire_lock, collect_sessions, detect_mover_bin, human, is_playing, load_config,
-    read_exclude, remove_empty_parents, run_mover, setup_logging, write_exclude,
+    read_exclude, remove_empty_parents, run_mover, run_rsync, setup_logging, share_mode_ok, write_exclude,
 )
 
 log = setup_logging("EmbyCleaner", "embycache_cleaner.log")
@@ -47,6 +49,42 @@ def scan_orphans(cfg, exclude, sessions):
                 continue
             orphans.append(f)
     return orphans, playing
+
+
+def move_with_rsync(cfg, files):
+    """Cache -> Array per rsync nach array_path (shfs wählt die Disk), Quelle erst nach Grössenvergleich löschen."""
+    cache, array = Path(cfg["cache_path"]), Path(cfg["array_path"])
+    moved = failures = 0
+    for i, src in enumerate(files, 1):
+        if failures >= 3:
+            log.error("Drei rsync-Fehler in Folge – abgebrochen, Ursache im Log prüfen")
+            break
+        rel = src.relative_to(cache)
+        dst = array / rel
+        if dst.exists():
+            log.warning(f"Ziel existiert schon auf dem Array (Duplikat?), Datei bleibt auf dem Cache: {rel}")
+            continue
+        log.info(f"[{i}/{len(files)}] -> ARRAY {human(src.stat().st_size):>10}  {rel}")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        cmd = ["rsync", *cfg["rsync_args"], str(src), str(dst)]
+        log.debug("rsync-Aufruf: " + " ".join(cmd))
+        rc, out = run_rsync(cmd)
+        if rc != 0:
+            failures += 1
+            log.error(f"rsync-Fehler (Code {rc}) bei {rel}: {out.strip()}")
+            continue
+        failures = 0
+        try:
+            if dst.stat().st_size != src.stat().st_size:
+                log.error(f"Grösse stimmt nicht überein nach rsync, Datei bleibt auf dem Cache: {rel}")
+                continue
+            src.unlink()
+        except OSError as e:
+            log.error(f"Quelle konnte nicht gelöscht werden (Datei liegt jetzt doppelt!): {src} ({e})")
+            continue
+        moved += 1
+        remove_empty_parents(src.parent, cache, log)
+    return moved
 
 
 def main():
@@ -89,18 +127,27 @@ def main():
             write_exclude(exclude | {str(f) for f in orphans})
             log.info(f"{len(orphans)} Dateien zur Exclude-Liste hinzugefügt")
         else:
-            mover = detect_mover_bin(cfg)
-            if not mover:
-                log.error("Kein Unraid move-Binary gefunden (mover_bin in der Config setzen)")
-                return 1
-            run_mover(mover, [str(f) for f in orphans], cfg["mover_debug_level"], log)
-            left = [f for f in orphans if f.exists()]
-            for f in left:
-                log.warning(f"Noch auf dem Cache: {f}")
+            cache = Path(cfg["cache_path"])
+            checked = {}
+            moved = 0
+            todo = [f for f in orphans if share_mode_ok(cfg, f.relative_to(cache).parts[0], checked, log)]
+            if cfg["cleanup_tool"] == "rsync":
+                log.info(f"Cleanup-Werkzeug: rsync nach {cfg['array_path']}")
+                moved = move_with_rsync(cfg, todo)
+            elif todo:
+                mover = detect_mover_bin(cfg)
+                if not mover:
+                    log.error("Kein Unraid move-Binary gefunden (mover_bin in der Config setzen)")
+                    return 1
+                run_mover(mover, [str(f) for f in todo], cfg["mover_debug_level"], log)
+                for f in todo:
+                    if not f.exists():
+                        moved += 1
+                        remove_empty_parents(f.parent, cache, log)
             for f in orphans:
-                if not f.exists():
-                    remove_empty_parents(f.parent, Path(cfg["cache_path"]), log)
-            log.info(f"Verschoben: {len(orphans) - len(left)} von {len(orphans)} Dateien")
+                if f.exists():
+                    log.warning(f"Noch auf dem Cache: {f}")
+            log.info(f"Verschoben: {moved} von {len(orphans)} Dateien")
         return 0
     except Exception:
         log.exception("Unerwarteter Fehler")

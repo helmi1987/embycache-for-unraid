@@ -146,10 +146,16 @@ def load_config(require_paths=True):
     # Umgebungsvariablen überschreiben einzelne Werte
     env_min = os.environ.get("EMBYCACHE_MIN_FREE_PERCENT")
     if env_min:
-        cfg["min_free_percent"] = float(env_min)
+        cfg["min_free_percent"] = env_min
     env_dbg = os.environ.get("EMBYCACHE_MOVER_DEBUG")
     if env_dbg:
-        cfg["mover_debug_level"] = int(env_dbg)
+        cfg["mover_debug_level"] = env_dbg
+    try:
+        cfg["min_free_percent"] = float(cfg["min_free_percent"])
+        cfg["mover_debug_level"] = int(cfg["mover_debug_level"])
+    except (TypeError, ValueError):
+        raise ConfigError("min_free_percent muss eine Zahl, mover_debug_level eine ganze Zahl sein "
+                          "(auch EMBYCACHE_MIN_FREE_PERCENT / EMBYCACHE_MOVER_DEBUG prüfen)")
     env_rsync = os.environ.get("EMBYCACHE_RSYNC_ARGS")
     if env_rsync is not None:
         cfg["rsync_args"] = env_rsync.split()
@@ -412,6 +418,30 @@ MOVER_MODE_HINT = {
           "aufs Array schiebt, ist ungetestet – ersten Lauf mit mover_debug_level 1 prüfen",
     None: "keine Share-Konfiguration gefunden – Mover-Richtung unbekannt, Cleanup wird versucht",
 }
+
+
+def share_mode_ok(cfg, share, checked, log):
+    """Prüft einmal pro Share, ob das move-Binary Cache → Array kann, und schreibt das Ergebnis ins Log.
+    Bei cleanup_tool=rsync immer True (rsync nach /mnt/user0 ist von der Mover-Richtung unabhängig)."""
+    if share in checked:
+        return checked[share]
+    if cfg["cleanup_tool"] == "rsync":
+        checked[share] = True
+        return True
+    mode, primary, secondary, source = share_mover_mode(cfg, share)
+    where = f"Primary {primary}, Secondary {secondary}; aus {source}" if mode else "keine Konfiguration gefunden"
+    hint = MOVER_MODE_HINT.get(mode, f"unbekannter Wert «{mode}»")
+    if mode == "yes":
+        log.info(f"Share «{share}»: shareUseCache=yes ({where}) – {hint}")
+        checked[share] = True
+    elif mode is None or mode == "no":
+        log.warning(f"Share «{share}»: shareUseCache={mode or '?'} ({where}) – {hint}")
+        checked[share] = True
+    else:
+        log.error(f"Share «{share}»: shareUseCache={mode} ({where}) – {hint}. "
+                  f"Cleanup für diesen Share übersprungen (Alternative: cleanup_tool=rsync).")
+        checked[share] = False
+    return checked[share]
 
 
 def summarize_mover_output(stdout, paths):
