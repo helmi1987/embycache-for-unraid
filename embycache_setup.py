@@ -162,6 +162,8 @@ def setup():
     cfg["max_favorite_series"] = ask_int("   Max. Favoriten-Serien pro Benutzer (0 = aus)", cfg["max_favorite_series"])
     cfg["min_free_percent"] = ask_int("   Mindestens frei auf dem Cache in % (ZFS: 20 ist sinnvoll)", cfg["min_free_percent"])
     cfg["movie_mode"] = ask("   Filme: 'folder' = ganzer Filmordner, 'file' = nur gleichnamige Dateien", cfg["movie_mode"])
+    cfg["parallel_per_disk"] = max(1, ask_int("   Gleichzeitige Kopien pro Array-Disk (1 = wie das Original)", cfg["parallel_per_disk"]))
+    cfg["parallel_total"] = max(0, ask_int("   Gleichzeitige Kopien insgesamt (0 = ohne Limit, 1 = sequentiell)", cfg["parallel_total"]))
 
     save_config(cfg)
     print(f"\n✔ Gespeichert: {CONFIG_FILE}")

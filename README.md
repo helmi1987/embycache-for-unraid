@@ -41,6 +41,7 @@ Ist Emby nicht (vollständig) erreichbar, wird der Cleanup übersprungen und die
 | `embycache_settings.json` | Konfiguration (siehe unten) |
 | `embycache_exclude.txt` | Aktuell gecachte Dateien; wird atomar geschrieben |
 | `embycache.lock` | Verhindert parallele Läufe |
+| `embycache_status.json` | Live-Status während `--run` (für `--status`) |
 | `logs/` | Rotierende Logs (10 MB × 20) |
 
 Alle Pfade sind relativ zum **Script-Verzeichnis**, nicht zum Arbeitsverzeichnis – das Script läuft also auch aus cron/User Scripts ohne `cd`. Mit `EMBYCACHE_DIR` lässt sich das Arbeitsverzeichnis trotzdem umbiegen.
@@ -84,10 +85,42 @@ Alle Pfade sind relativ zum **Script-Verzeichnis**, nicht zum Arbeitsverzeichnis
     "rsync_args": ["-aAX", "--numeric-ids"], // vollständige rsync-Optionen, Default = Original
     "fill_tool": "rsync",                  // Array -> Cache: rsync oder mover (Unraid move-Binary, siehe Hinweise)
     "cleanup_tool": "mover",               // Cache -> Array: mover (wie Original) oder rsync (unabhängig von der Mover-Richtung)
+    "parallel_per_disk": 1,                // Befüllen per rsync: gleichzeitige Kopien pro Quell-Disk (1 = wie das Original)
+    "parallel_total": 1,                   // gleichzeitige Kopien insgesamt (0 = ohne Limit); 1/1 = sequentiell wie das Original
+    "copy_progress": true,                 // rsync zusätzlich mit --info=progress2 (nur Ausgabe) – Fortschritt pro Datei
+    "status_log_interval": 60,             // Sekunden zwischen Fortschrittszeilen im Log (0 = aus)
     "api_timeout": 10,
     "shares_cfg_dir": "/boot/config/shares" // für die Prüfung der Mover-Richtung pro Share
 }
 ```
+
+### Status und paralleles Kopieren
+
+Während `--run` schreibt das Script laufend `embycache_status.json` (alle 2 s, atomar). Aus einer zweiten Shell:
+
+```
+python3 embycache_run.py --status          # einmal anzeigen
+python3 embycache_run.py --status --watch  # alle 2 s neu (--watch 5 = alle 5 s), Ende mit Ctrl+C
+```
+
+```
+EmbyCache 7.3.0 – Status: läuft, PID 930, Modus RUN
+Phase: Befüllen (Array -> Cache)  –  3/6 Dateien, 10.73 GB von 17.17 GB (62 %)
+Aktiv (3):
+  [3/6] disk1     25 %   732.42 MB / 2.86 GB   180.00MB/s  Rest 0:00:12  Serien/Show1/E3.mkv
+  [5/6] disk2     25 %   732.42 MB / 2.86 GB   175.00MB/s  Rest 0:00:13  Serien/Show2/E2.mkv
+Zuletzt fertig:
+  ok     disk1       2.86 GB     16.0 s  Serien/Show1/E2.mkv
+```
+
+Im Log steht pro Datei `[n/N] Start disk3 …` und `[n/N] Fertig … in X s (Y/s)`, dazu alle `status_log_interval` Sekunden eine Zeile «Fortschritt …» mit Gesamtstand, Rate, Restzeit und den aktiven Kopien. Der Fortschritt innerhalb einer Datei kommt aus `--info=progress2` von rsync (reine Ausgabe-Option, ändert nichts am Kopieren; `copy_progress: false` schaltet sie ab, dann zeigt der Status nur ganze Dateien). Endet der Prozess ohne Abschluss, zeigt `--status` «abgebrochen».
+
+**Parallel (nur `fill_tool: rsync`).** Die Dateien werden nach Quell-Disk (`/mnt/diskN`, auch bei `array_source: user0` ermittelt) gruppiert. `parallel_per_disk` = gleichzeitige Kopien pro Disk, `parallel_total` = Obergrenze über alle Disks (0 = keine). Beispiel `parallel_per_disk: 1`, `parallel_total: 4`: bis zu 4 Disks lesen gleichzeitig, jede eine Datei. Der Freiplatz-Check passiert vor dem Start für alle Kopien zusammen (geplante Kopien werden abgezogen). Drei rsync-Fehler in Folge stoppen neue Kopien, laufende werden fertig.
+
+Hinweise:
+* Mehr als 1 pro Disk heisst: eine HDD liest zwei Dateien gleichzeitig, der Kopf springt zwischen beiden. Bei HDDs bringt das in der Regel keinen höheren Gesamtdurchsatz, oft weniger. Der Gewinn kommt aus mehreren Disks parallel. Selbst messen: `parallel_per_disk` 1 vs. 2 bei gleichem `parallel_total`.
+* Mit `array_source: user0` läuft jede Kopie über shfs (FUSE); `array_source: disk` liest direkt von `/mnt/diskN`.
+* `fill_tool: mover` und der Cleanup über das move-Binary bleiben sequentiell (ein Aufruf mit allen Pfaden). Ob mehrere move-Binaries gleichzeitig laufen dürfen, ist von Unraid nicht dokumentiert – deshalb nicht parallelisiert. Der Cleanup per rsync läuft ebenfalls sequentiell (Ziel-Disk wählt shfs, Paritäts-Schreiben ist der Engpass).
 
 ### Budget-Modus
 
@@ -114,11 +147,12 @@ Filme: Liegt der Film in einem eigenen Ordner, wird der ganze Ordner mitgenommen
 | `… --show-on-deck --compact` | Report ohne einzelne Dateien |
 | `python3 embycache_run.py` | Dry-Run: alle geplanten Aktionen, keine Dateioperationen |
 | `python3 embycache_run.py --run` | Scharf |
+| `python3 embycache_run.py --status [--watch [SEK]]` | Live-Status des laufenden bzw. letzten Laufs (aus `embycache_status.json`) |
 | `python3 embycache_cleaner.py` | Waisen auf dem Cache anzeigen |
 | `python3 embycache_cleaner.py --run` | Waisen aufs Array verschieben |
 | `python3 embycache_cleaner.py --add-to-list` | Waisen in die Exclude-Liste aufnehmen |
 
-Umgebungsvariablen: `EMBYCACHE_MODE` (dry / report / run), `EMBYCACHE_DIR`, `EMBYCACHE_CONFIG`, `EMBYCACHE_LOG_LEVEL`, `EMBYCACHE_MIN_FREE_PERCENT`, `EMBYCACHE_MOVER_DEBUG`, `EMBYCACHE_RSYNC_ARGS`, `EMBYCACHE_FILL_TOOL`, `EMBYCACHE_CLEANUP_TOOL`, `EMBYCACHE_CACHE_BUDGET`, `EMBYCACHE_REPORT_USER`. Der Hilfetext im Kopf jedes Scripts beschreibt sie.
+Umgebungsvariablen: `EMBYCACHE_MODE` (dry / report / run), `EMBYCACHE_DIR`, `EMBYCACHE_CONFIG`, `EMBYCACHE_LOG_LEVEL`, `EMBYCACHE_MIN_FREE_PERCENT`, `EMBYCACHE_MOVER_DEBUG`, `EMBYCACHE_RSYNC_ARGS`, `EMBYCACHE_FILL_TOOL`, `EMBYCACHE_CLEANUP_TOOL`, `EMBYCACHE_CACHE_BUDGET`, `EMBYCACHE_REPORT_USER`, `EMBYCACHE_PARALLEL_PER_DISK`, `EMBYCACHE_PARALLEL_TOTAL`, `EMBYCACHE_STATUS_LOG_INTERVAL`. Der Hilfetext im Kopf jedes Scripts beschreibt sie.
 
 Beispiel-Report (`--show-on-deck`, mit `--compact` ohne die Dateizeilen):
 

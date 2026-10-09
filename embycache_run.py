@@ -31,6 +31,7 @@ Aufruf:
       --user Benj,Kid   nur diese Benutzer anzeigen (Name oder ID); die Planung läuft immer für alle
       --compact         nur Einträge, keine einzelnen Dateien
   python3 embycache_run.py --run           Scharf
+  python3 embycache_run.py --status        Live-Status des laufenden bzw. letzten Laufs (--watch [SEK] = laufend neu)
 
 Umgebungsvariablen (überschreiben Config bzw. Defaults; CLI-Flags haben Vorrang vor EMBYCACHE_MODE):
   EMBYCACHE_MODE              dry | report | run
@@ -44,18 +45,23 @@ Umgebungsvariablen (überschreiben Config bzw. Defaults; CLI-Flags haben Vorrang
   EMBYCACHE_CLEANUP_TOOL      mover | rsync (überschreibt cleanup_tool)
   EMBYCACHE_CACHE_BUDGET      z.B. "2.5T" (überschreibt cache_budget; "" = Zähl-Modus)
   EMBYCACHE_REPORT_USER       wie --user
+  EMBYCACHE_PARALLEL_PER_DISK gleichzeitige rsync-Kopien pro Quell-Disk (überschreibt parallel_per_disk)
+  EMBYCACHE_PARALLEL_TOTAL    gleichzeitige rsync-Kopien insgesamt, 0 = ohne Limit (überschreibt parallel_total)
+  EMBYCACHE_STATUS_LOG_INTERVAL  Sekunden zwischen Fortschrittszeilen im Log, 0 = aus
 
 Beispiel User Scripts (Unraid):  cd /mnt/user/system/scripts/embycache && python3 embycache_run.py --run
 """
 import argparse
+import collections
 import os
-import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from embycache_lib import (
-    ConfigError, EmbyApi, Locations, acquire_lock, collect_sessions, detect_mover_bin, free_percent_after,
-    human, is_playing, load_config, read_exclude, remove_empty_parents, run_mover, setup_logging,
+    ConfigError, EmbyApi, Locations, Status, acquire_lock, format_status, collect_sessions, detect_mover_bin, free_percent_after,
+    human, is_playing, load_config, read_exclude, remove_empty_parents, run_mover, run_rsync, setup_logging,
     share_mover_mode, summarize_mover_output, unraid_mover_running, write_exclude, EXCLUDE_FILE, MOVER_MODE_HINT,
     __version__,
 )
@@ -458,6 +464,9 @@ class Runner:
         self.fill_planned = self.cleanup_planned = 0
         self.sim_delta = 0  # Dry-Run: Bytes, die der Cleanup freigäbe, minus Bytes geplanter Kopien
         self.copied = self.moved_back = 0
+        self.fill_failures = 0
+        self._lock = threading.Lock()  # Zähler und Löschen/Ordner-Aufräumen bei parallelen Kopien
+        self.status = Status(mode, log, enabled=self.run_mode, log_interval=cfg["status_log_interval"])
 
     def share_mode_ok(self, share, checked):
         """Prüft einmal pro Share, ob das move-Binary Cache → Array kann, und schreibt das Ergebnis ins Log."""
@@ -483,10 +492,10 @@ class Runner:
 
     def cleanup_with_rsync(self, loc, candidates, listing, protected):
         """Cache -> Array per rsync nach /mnt/user0 (shfs wählt die Disk), Quelle erst nach Prüfung löschen."""
-        rsync_args = list(self.cfg["rsync_args"])
         sizes = {str(loc.cache / r): sz for r, sz in listing}
         failures = 0
-        for p in candidates:
+        self.status.phase("Cleanup (Cache -> Array, rsync)", len(candidates), sum(sizes.values()))
+        for i, p in enumerate(candidates, 1):
             src = Path(p)
             rel = src.relative_to(loc.cache)
             dst = loc.on_array(rel)
@@ -499,25 +508,32 @@ class Runner:
                 protected.add(p)
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            cmd = ["rsync", *rsync_args, str(src), str(dst)]
+            key = f"{i}:{rel}"
+            log.info(f"[{i}/{len(candidates)}] -> ARRAY {human(sizes.get(p, 0)):>10}  {rel}")
+            self.status.job_start(key, rel, "Array", sizes.get(p, 0), i)
+            cmd = self.rsync_cmd(src, dst)
             log.debug("rsync-Aufruf (Cleanup): " + " ".join(cmd))
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode != 0:
+            rc, out = run_rsync(cmd, lambda done, speed, eta: self.status.job_progress(key, done, speed, eta))
+            if rc != 0:
                 failures += 1
-                log.error(f"rsync-Fehler (Code {res.returncode}) bei {rel}: {res.stderr.strip() or res.stdout.strip()}")
+                log.error(f"rsync-Fehler (Code {rc}) bei {rel}: {out.strip()}")
                 protected.add(p)
+                self.status.job_end(key, False)
                 continue
             failures = 0
             try:
                 if dst.stat().st_size != src.stat().st_size:
                     log.error(f"Grösse stimmt nicht überein nach rsync, Datei bleibt auf dem Cache: {rel}")
                     protected.add(p)
+                    self.status.job_end(key, False)
                     continue
                 src.unlink()
             except OSError as e:
                 log.error(f"Quelle konnte nicht gelöscht werden (Datei liegt jetzt doppelt!): {src} ({e})")
                 protected.add(p)
+                self.status.job_end(key, False)
                 continue
+            self.status.job_end(key, True)
             self.moved_back += 1
             self.moved_back_bytes += sizes.get(p, 0)
             remove_empty_parents(src.parent, loc.cache, log)
@@ -568,6 +584,7 @@ class Runner:
             log.error("Kein Unraid move-Binary gefunden (mover_bin in der Config setzen) – Cleanup übersprungen")
             protected.update(candidates)
             return
+        self.status.phase("Cleanup (Cache -> Array, move-Binary)", len(candidates), self.to_array)
         rc, stdout, stderr = run_mover(mover, candidates, self.cfg["mover_debug_level"], log)
         messages = summarize_mover_output(stdout + "\n" + stderr, candidates)
         left_by_reason = {}
@@ -599,21 +616,18 @@ class Runner:
                               "Allocation/Split-Level oder eingeschlossene Disks prüfen).")
 
     def fill(self, loc, files, sessions):
-        """On-Deck-Dateien vom Array auf den Cache – per rsync (Quelle erst nach Prüfung löschen) oder per move-Binary."""
-        rsync_args = list(self.cfg["rsync_args"])
+        """On-Deck-Dateien vom Array auf den Cache – per rsync (Quelle erst nach Prüfung löschen) oder per move-Binary.
+        Erst wird geplant (Freiplatz inkl. aller geplanten Kopien), dann kopiert – sequentiell oder parallel pro Disk."""
         from_disk = self.cfg["array_source"] == "disk"
         min_free = float(self.cfg["min_free_percent"])
         use_mover = self.cfg["fill_tool"] == "mover"
         label = "MOVE" if use_mover else "COPY"
-        mover_batch = []  # (OnDeckFile, src) für fill_tool=mover
-        failures = 0
+        jobs = []  # (OnDeckFile, src, disk)
+        pending = 0  # scharfer Lauf: Bytes, die die geplanten Kopien noch belegen werden
         last_group = None
         for f in sorted(files, key=lambda x: str(x.rel)):
             if f.on_cache:
                 continue
-            if failures >= 3:
-                log.error("Drei rsync-Fehler in Folge – Befüllen abgebrochen, Ursache im Log prüfen")
-                break
             if is_playing(f.rel, sessions):
                 log.info(f"[SKIP: läuft gerade] {f.rel}")
                 continue
@@ -626,60 +640,146 @@ class Runner:
                 if self.run_mode:
                     share_root.mkdir(parents=True, exist_ok=True)
             # Dataset (Quota) und Pool-Wurzel prüfen – appdata liegt oft auf demselben Pool
-            free_after = free_percent_after(loc.cache, f.size, self.sim_delta)
+            delta = self.sim_delta if not self.run_mode else -pending
+            free_after = free_percent_after(loc.cache, f.size, delta)
             if share_root.is_dir():
-                free_after = min(free_after, free_percent_after(share_root, f.size, self.sim_delta))
+                free_after = min(free_after, free_percent_after(share_root, f.size, delta))
             if free_after < min_free:
                 log.warning(f"[SKIP: Freiplatz] {f.rel} ({human(f.size)}) – danach nur {free_after:.1f} % frei, Minimum {min_free:g} %"
-                            + (" (Dry-Run: Cleanup und geplante Kopien eingerechnet)" if not self.run_mode else ""))
+                            + (" (Dry-Run: Cleanup und geplante Kopien eingerechnet)" if not self.run_mode
+                               else " (geplante Kopien eingerechnet)"))
                 continue
-            sources = loc.on_disk(f.rel) if from_disk else []
-            if len(sources) > 1:
-                log.warning(f"Datei liegt auf mehreren Disks (Duplikat im Array!): {', '.join(map(str, sources))} – nehme die erste")
+            disks = loc.on_disk(f.rel)
+            sources = disks if from_disk else []
+            if len(disks) > 1:
+                log.warning(f"Datei liegt auf mehreren Disks (Duplikat im Array!): {', '.join(map(str, disks))} – nehme die erste")
             src = sources[0] if sources else loc.on_array(f.rel)
             if not src.is_file():
                 log.warning(f"Quelle nicht gefunden: {src}")
                 continue
+            disk = self._disk_name(disks[0], loc) if disks else "?"
             self.to_cache += f.size
             self.fill_planned += 1
             key = group_key(f.rel)
             if key != last_group:
                 log.info(f"[{label if self.run_mode else 'PLAN:'} -> CACHE] {key}   ({f.reason})")
                 last_group = key
-            log.info(f"      {human(f.size):>10}  {f.rel}")
+            log.info(f"      {human(f.size):>10}  {disk:<7} {f.rel}")
             if not self.run_mode:
                 self.sim_delta -= f.size  # Dry-Run: diese Kopie würde Platz belegen
                 continue
-            if use_mover:
-                mover_batch.append((f, src))
-                continue
+            pending += f.size
+            jobs.append((f, src, disk))
 
-            dst = loc.on_cache(f.rel)
+        per_disk, total = self.cfg["parallel_per_disk"], self.cfg["parallel_total"]
+        if not use_mover and (per_disk > 1 or total != 1):
+            n_disks = len({d for _, _, d in jobs}) or 1
+            limit = per_disk * n_disks if total == 0 else min(total, per_disk * n_disks)
+            log.info(f"Parallel: {per_disk} pro Disk, {'ohne Gesamtlimit' if total == 0 else f'höchstens {total} gesamt'}"
+                     f" – {n_disks} Quell-Disk(s), also bis {limit} Kopien gleichzeitig")
+        if not jobs:
+            return
+        if use_mover:
+            self.fill_with_mover(loc, [(f, src) for f, src, _ in jobs])
+            return
+        self.status.phase("Befüllen (Array -> Cache)", len(jobs), sum(f.size for f, _, _ in jobs))
+        if per_disk == 1 and total == 1:
+            for i, job in enumerate(jobs, 1):  # wie das Original: eine Datei nach der anderen
+                if self.fill_failures >= 3:
+                    log.error("Drei rsync-Fehler in Folge – Befüllen abgebrochen, Ursache im Log prüfen")
+                    break
+                self.copy_one(loc, *job, i, len(jobs))
+        else:
+            self.copy_parallel(loc, jobs, per_disk, total)
+        log.info(self.status.summary())
+
+    def copy_parallel(self, loc, jobs, per_disk, total):
+        """Pro Quell-Disk eine Warteschlange mit per_disk Workern; total begrenzt alle Disks zusammen (0 = ohne Limit)."""
+        queues = {}
+        for i, (f, src, disk) in enumerate(jobs, 1):
+            queues.setdefault(disk, collections.deque()).append((f, src, disk, i))
+        gate = threading.Semaphore(total) if total > 0 else None
+        stop = threading.Event()
+
+        def worker(disk):
+            q = queues[disk]
+            while not stop.is_set():
+                with self._lock:
+                    if not q:
+                        return
+                    f, src, d, i = q.popleft()
+                if gate:
+                    gate.acquire()
+                try:
+                    if stop.is_set():
+                        return
+                    self.copy_one(loc, f, src, d, i, len(jobs))
+                    if self.fill_failures >= 3 and not stop.is_set():
+                        stop.set()
+                        log.error("Drei rsync-Fehler in Folge – Befüllen abgebrochen (laufende Kopien werden fertig), "
+                                  "Ursache im Log prüfen")
+                finally:
+                    if gate:
+                        gate.release()
+
+        threads = [threading.Thread(target=worker, args=(disk,), name=f"copy-{disk}-{n}", daemon=True)
+                   for disk, q in queues.items() for n in range(min(per_disk, len(q)))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def rsync_cmd(self, src, dst):
+        extra = ["--info=progress2"] if self.cfg["copy_progress"] else []
+        return ["rsync", *self.cfg["rsync_args"], *extra, str(src), str(dst)]
+
+    def copy_one(self, loc, f, src, disk, index, count):
+        """Eine Datei Array -> Cache per rsync, Grössenvergleich, dann Quelle löschen. Thread-sicher."""
+        dst = loc.on_cache(f.rel)
+        key = f"{index}:{f.rel}"
+        log.info(f"[{index}/{count}] Start  {disk:<7} {human(f.size):>10}  {f.rel}")
+        self.status.job_start(key, f.rel, disk, f.size, index)
+        t0 = time.time()
+        ok = False
+        try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            cmd = ["rsync", *rsync_args, str(src), str(dst)]
+            cmd = self.rsync_cmd(src, dst)
             log.debug("rsync-Aufruf: " + " ".join(cmd))
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode != 0:
-                failures += 1
-                log.error(f"rsync-Fehler (Code {res.returncode}) bei {f.rel}: {res.stderr.strip() or res.stdout.strip()}")
+            rc, out = run_rsync(cmd, lambda done, speed, eta: self.status.job_progress(key, done, speed, eta))
+            if rc != 0:
+                with self._lock:
+                    self.fill_failures += 1
+                log.error(f"rsync-Fehler (Code {rc}) bei {f.rel}: {out.strip()}")
                 log.error("Quelle bleibt auf dem Array; Ziel prüfen, sonst liegt die Datei doppelt")
-                continue
-            failures = 0
-            try:
-                if dst.stat().st_size != src.stat().st_size:
-                    log.error(f"Grösse stimmt nicht überein nach rsync, Quelle bleibt: {f.rel}")
-                    continue
-                src.unlink()
-            except OSError as e:
-                log.error(f"Quelle konnte nicht gelöscht werden (Datei liegt jetzt doppelt!): {src} ({e})")
-                continue
-            self.copied += 1
-            self.copied_bytes += f.size
-            f.on_cache = True
-            remove_empty_parents(src.parent, self._disk_root(src, loc, bool(sources)), log)
+                return
+            with self._lock:
+                self.fill_failures = 0
+                try:
+                    if dst.stat().st_size != src.stat().st_size:
+                        log.error(f"Grösse stimmt nicht überein nach rsync, Quelle bleibt: {f.rel}")
+                        return
+                    src.unlink()
+                except OSError as e:
+                    log.error(f"Quelle konnte nicht gelöscht werden (Datei liegt jetzt doppelt!): {src} ({e})")
+                    return
+                self.copied += 1
+                self.copied_bytes += f.size
+                f.on_cache = True
+                ok = True
+                remove_empty_parents(src.parent, self._disk_root(src, loc, src != loc.on_array(f.rel)), log)
+        finally:
+            self.status.job_end(key, ok)
+            secs = time.time() - t0
+            if ok:
+                log.info(f"[{index}/{count}] Fertig {disk:<7} {human(f.size):>10} in {secs:.0f} s "
+                         f"({human(f.size / secs if secs > 0 else 0)}/s)  {f.rel}")
 
-        if mover_batch:
-            self.fill_with_mover(loc, mover_batch)
+    @staticmethod
+    def _disk_name(path, loc):
+        """/mnt/disk3/Filme/x.mkv -> disk3"""
+        depth = len(Path(loc.disks_glob).parts)
+        parts = Path(path).parts
+        return parts[depth - 1] if len(parts) >= depth else "?"
 
     def fill_with_mover(self, loc, batch):
         """Array -> Cache über das Unraid move-Binary (ein Aufruf für alle Dateien), danach Ergebnis prüfen."""
@@ -688,6 +788,7 @@ class Runner:
             log.error("Kein Unraid move-Binary gefunden (mover_bin in der Config setzen) – nichts kopiert")
             return
         log.info(f"Befüllen: {len(batch)} Dateien ({human(sum(f.size for f, _ in batch))}) per move-Binary Array -> Cache")
+        self.status.phase("Befüllen (Array -> Cache, move-Binary)", len(batch), sum(f.size for f, _ in batch))
         run_mover(mover, [str(src) for _, src in batch], self.cfg["mover_debug_level"], log)
         for f, src in batch:
             dst = loc.on_cache(f.rel)
@@ -785,6 +886,15 @@ class Runner:
         print(f"Exclude-Liste: {EXCLUDE_FILE} ({len(read_exclude())} Einträge)\n")
 
     def execute(self):
+        state = "abgebrochen (Fehler)"
+        try:
+            rc = self._execute()
+            state = "fertig"
+            return rc
+        finally:
+            self.status.finish(state)
+
+    def _execute(self):
         cfg = self.cfg
         log.info(f"=== EmbyCache {__version__} – Modus: {self.mode.upper()} ===")
         if unraid_mover_running():
@@ -837,7 +947,20 @@ def main():
     parser.add_argument("--show-on-deck", action="store_true", help="Nur die On-Deck-Liste anzeigen (pro Benutzer, nach Quelle)")
     parser.add_argument("--user", help="Report nur für diese Benutzer (Name oder ID, Komma-getrennt); nur mit --show-on-deck")
     parser.add_argument("--compact", action="store_true", help="Report ohne einzelne Dateien, nur Einträge")
+    parser.add_argument("--status", action="store_true", help="Status des laufenden bzw. letzten Laufs anzeigen")
+    parser.add_argument("--watch", type=float, nargs="?", const=2, metavar="SEK",
+                        help="mit --status: alle SEK Sekunden neu anzeigen (Default 2), Ende mit Ctrl+C")
     args = parser.parse_args()
+    if args.status:
+        if not args.watch:
+            print(format_status())
+            return 0
+        try:
+            while True:
+                print("\033[2J\033[H" + format_status(), flush=True)
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            return 0
     mode = os.environ.get("EMBYCACHE_MODE", "dry").lower()
     if args.run:
         mode = "run"
