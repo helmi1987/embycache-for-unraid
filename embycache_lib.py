@@ -48,7 +48,7 @@ DEFAULTS = {
     "cache_path": "/mnt/cache",          # Pool, auf den gecacht wird (z.B. /mnt/cache oder /mnt/master)
     "array_path": "/mnt/user0",          # Array-Sicht ohne Pools (FUSE)
     "user_path": "/mnt/user",            # Zusammengeführte Sicht (Emby sieht diese Pfade)
-    "array_disks_glob": "/mnt/disk[0-9]*",  # Echte Array-Disks (nur für array_source = disk)
+    "array_disks_glob": "/mnt/disk[0-9]*",  # Echte Array-Disks (Quelle bei array_source = disk, Disk-Zuordnung für Parallelität/Status)
     "array_source": "user0",             # rsync-Quelle: user0 = /mnt/user0/... wie das Original, disk = echte /mnt/diskN-Pfade
     "instances": [],                     # [{"servername": "...", "url": "...", "api_key": "...", "path_mappings": {...}}]
     "path_mappings": {},                 # Globales Mapping Docker-Pfad -> Host-Pfad (/mnt/user/...)

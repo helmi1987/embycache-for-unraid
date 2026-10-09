@@ -17,12 +17,14 @@ Ablauf pro Lauf:
        rsync:           rsync /mnt/<pool>/<rel> -> /mnt/user0/<rel> (shfs wählt die Disk), Grössenvergleich, dann
                         Quelle löschen – unabhängig von der Mover-Richtung des Shares
   4. Befüllen: On-Deck-Dateien, die noch auf dem Array liegen -> auf den Cache. Werkzeug per fill_tool:
-       rsync (Default): rsync -aAX --numeric-ids /mnt/user0/<rel> /mnt/<pool>/<rel> – exakt wie das Original;
+       rsync (Default): rsync -aAX --numeric-ids /mnt/user0/<rel> /mnt/<pool>/<rel> – wie das Original (plus
+                        --info=progress2 für den Status, abschaltbar mit copy_progress=false);
                         Quelle erst nach Rückgabecode 0 und Grössenvergleich löschen. array_source = disk liest
                         stattdessen vom echten /mnt/diskN-Pfad (schneller, am FUSE vorbei) – optional
        mover:           Array-Pfade ans Unraid move-Binary pipen (wie der Stock-Mover bei «prefer»-Shares);
                         das Binary wählt den Pool aus der Share-Konfiguration – vorher mit einer Datei testen
-     Der Freiplatz-Floor wird in beiden Fällen vorher geprüft
+     Der Freiplatz-Floor wird in beiden Fällen vorher für alle geplanten Kopien zusammen geprüft.
+     rsync-Kopien optional parallel: parallel_per_disk pro Quell-Disk, parallel_total gesamt (Default 1/1 = sequentiell)
   5. Exclude-Liste neu schreiben (alle On-Deck-Dateien, die jetzt auf dem Cache liegen)
 
 Aufruf:
