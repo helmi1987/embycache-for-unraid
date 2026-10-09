@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+logs/
+embycache_settings.json
+embycache_exclude.txt
+embycache_exclude.tmp
+embycache.lock
+embycache_status.json
+embycache_status.tmp
