@@ -13,26 +13,31 @@ Umgebungsvariablen (gelten für alle Scripte):
   EMBYCACHE_LOG_LEVEL  DEBUG | INFO | WARNING; Default INFO
 """
 import copy
+import datetime
 import fcntl
 import glob
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-__version__ = "7.2.1 (2026-09-19)"
+__version__ = "7.3.0 (2026-10-09)"
 
 BASE_DIR = Path(os.environ.get("EMBYCACHE_DIR") or Path(__file__).resolve().parent)
 CONFIG_FILE = Path(os.environ.get("EMBYCACHE_CONFIG") or (BASE_DIR / "embycache_settings.json"))
 EXCLUDE_FILE = BASE_DIR / "embycache_exclude.txt"
 LOCK_FILE = BASE_DIR / "embycache.lock"
+STATUS_FILE = BASE_DIR / "embycache_status.json"
 LOG_DIR = BASE_DIR / "logs"
 
 MOVER_CANDIDATES = ["/usr/libexec/unraid/move", "/usr/local/sbin/move", "/usr/local/bin/move"]
@@ -65,6 +70,10 @@ DEFAULTS = {
     "fill_tool": "rsync",                # Array -> Cache: rsync (kopieren + Quelle löschen) oder mover (Unraid move-Binary)
     "cleanup_tool": "mover",             # Cache -> Array: mover (Unraid move-Binary, wie das Original) oder rsync
                                          #   (rsync /mnt/<pool>/<rel> -> /mnt/user0/<rel>, unabhängig von der Mover-Richtung des Shares)
+    "parallel_per_disk": 1,              # Befüllen per rsync: gleichzeitige Kopien pro Quell-Disk (1 = wie das Original)
+    "parallel_total": 1,                 # Befüllen per rsync: gleichzeitige Kopien insgesamt (0 = ohne Limit, nur parallel_per_disk)
+    "copy_progress": True,               # rsync zusätzlich mit --info=progress2 (nur Ausgabe) – Fortschritt pro Datei im Status
+    "status_log_interval": 60,           # Sekunden zwischen Fortschrittszeilen im Log während des Kopierens (0 = aus)
     "api_timeout": 10,                   # Sekunden pro API-Aufruf
     "shares_cfg_dir": "/boot/config/shares",  # Unraid Share-Konfigurationen (für die Mover-Richtungs-Prüfung)
 }
@@ -202,6 +211,18 @@ def load_config(require_paths=True):
         raise ConfigError("cleanup_tool muss 'rsync' oder 'mover' sein")
     if cfg["array_source"] not in ("user0", "disk"):
         raise ConfigError("array_source muss 'user0' oder 'disk' sein")
+    for key, env, minimum in (("parallel_per_disk", "EMBYCACHE_PARALLEL_PER_DISK", 1),
+                              ("parallel_total", "EMBYCACHE_PARALLEL_TOTAL", 0),
+                              ("status_log_interval", "EMBYCACHE_STATUS_LOG_INTERVAL", 0)):
+        if os.environ.get(env):
+            cfg[key] = os.environ[env]
+        try:
+            cfg[key] = int(cfg[key])
+        except (TypeError, ValueError):
+            raise ConfigError(f"{key} muss eine ganze Zahl sein")
+        if cfg[key] < minimum:
+            raise ConfigError(f"{key} muss mindestens {minimum} sein")
+    cfg["copy_progress"] = bool(cfg["copy_progress"])
     if not cfg["rsync_args"]:
         raise ConfigError("rsync_args darf nicht leer sein (Original: [\"-aAX\", \"--numeric-ids\"])")
     return cfg
@@ -440,6 +461,185 @@ def run_mover(mover_bin, paths, debug_level, log):
     if proc.returncode != 0:
         log.error(f"move-Binary endete mit Code {proc.returncode}")
     return proc.returncode, proc.stdout, proc.stderr
+
+
+# --------------------------------------------------------------------------- rsync / Status
+_PROGRESS_RE = re.compile(r"^\s*([\d,.']+)\s+(\d+)%\s+(\S+/s)\s+(\d+:\d+:\d+)")
+
+
+def run_rsync(cmd, on_progress=None):
+    """Startet rsync, liest stdout+stderr laufend und meldet --info=progress2-Zeilen an on_progress(bytes, speed, eta).
+    Liefert (returncode, Meldungen ohne Fortschrittszeilen)."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as e:
+        return 127, str(e)
+    messages = []
+
+    def handle(raw):
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line:
+            return
+        m = _PROGRESS_RE.match(line)
+        if m:
+            if on_progress:
+                on_progress(int(re.sub(r"\D", "", m.group(1)) or 0), m.group(3), m.group(4))
+        else:
+            messages.append(line)
+
+    buf = b""
+    while True:
+        chunk = proc.stdout.read1(65536)
+        if not chunk:
+            break
+        parts = re.split(rb"[\r\n]", buf + chunk)
+        buf = parts.pop()
+        for part in parts:
+            handle(part)
+    handle(buf)
+    return proc.wait(), "\n".join(messages)
+
+
+def _fmt_duration(seconds):
+    seconds = int(max(0, seconds))
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
+class Status:
+    """Live-Status des Laufs: schreibt embycache_status.json (atomar, höchstens alle 2 s) und auf Wunsch
+    periodisch eine Fortschrittszeile ins Log. Thread-sicher (Kopien laufen parallel)."""
+
+    def __init__(self, mode, log, enabled=True, log_interval=60):
+        self.log = log
+        self.enabled = enabled
+        self.log_interval = log_interval
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._dirty = True
+        self._last_log = time.time()
+        self.data = {"pid": os.getpid(), "version": __version__, "mode": mode, "state": "läuft",
+                     "started": time.time(), "updated": time.time(), "phase": "Start", "phase_started": time.time(),
+                     "files_total": 0, "bytes_total": 0, "files_done": 0, "files_failed": 0, "bytes_done": 0,
+                     "jobs": {}, "recent": []}
+        if self.enabled:
+            self._write()
+            self._thread = threading.Thread(target=self._ticker, name="status", daemon=True)
+            self._thread.start()
+
+    def phase(self, name, files=0, size=0):
+        with self._lock:
+            self.data.update(phase=name, phase_started=time.time(), files_total=files, bytes_total=size,
+                             files_done=0, files_failed=0, bytes_done=0, jobs={})
+            self._dirty = True
+            self._last_log = time.time()
+
+    def job_start(self, key, rel, disk, size, index):
+        with self._lock:
+            self.data["jobs"][key] = {"rel": str(rel), "disk": disk, "size": size, "done": 0, "speed": "",
+                                      "eta": "", "started": time.time(), "index": index}
+            self._dirty = True
+
+    def job_progress(self, key, done, speed="", eta=""):
+        with self._lock:
+            job = self.data["jobs"].get(key)
+            if job:
+                job.update(done=min(done, job["size"]) if job["size"] else done, speed=speed, eta=eta)
+                self._dirty = True
+
+    def job_end(self, key, ok):
+        with self._lock:
+            job = self.data["jobs"].pop(key, None)
+            if not job:
+                return
+            if ok:
+                self.data["files_done"] += 1
+                self.data["bytes_done"] += job["size"]
+            else:
+                self.data["files_failed"] += 1
+            self.data["recent"] = ([{"rel": job["rel"], "disk": job["disk"], "size": job["size"], "ok": ok,
+                                     "seconds": round(time.time() - job["started"], 1)}] + self.data["recent"])[:10]
+            self._dirty = True
+
+    def finish(self, state="fertig"):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+        with self._lock:
+            self.data.update(state=state, phase="Ende", jobs={}, finished=time.time())
+            self._dirty = True
+            if self.enabled:
+                self._write()
+
+    def summary(self):
+        """Eine Zeile für das Log: Phase, Dateien, Bytes, aktive Kopien."""
+        d = self.data
+        done = d["bytes_done"] + sum(j["done"] for j in d["jobs"].values())
+        pct = f" ({done / d['bytes_total'] * 100:.0f} %)" if d["bytes_total"] else ""
+        elapsed = time.time() - d["phase_started"]
+        rate = done / elapsed if elapsed > 0 else 0
+        eta = f", Rest ca. {_fmt_duration((d['bytes_total'] - done) / rate)}" if rate > 0 and d["bytes_total"] > done else ""
+        active = ", ".join(f"{j['disk']}: {Path(j['rel']).name} {j['done'] * 100 // j['size'] if j['size'] else 0} %"
+                           for j in d["jobs"].values())
+        return (f"Fortschritt {d['phase']}: {d['files_done']}/{d['files_total']} Dateien, {human(done)} von "
+                f"{human(d['bytes_total'])}{pct}, {human(rate)}/s{eta}"
+                + (f", {d['files_failed']} Fehler" if d["files_failed"] else "")
+                + (f" | aktiv ({len(d['jobs'])}): {active}" if active else ""))
+
+    def _ticker(self):
+        while not self._stop.wait(2):
+            with self._lock:
+                if self._dirty:
+                    self._write()
+                if self.log_interval and self.data["jobs"] and time.time() - self._last_log >= self.log_interval:
+                    self._last_log = time.time()
+                    self.log.info(self.summary())
+
+    def _write(self):
+        """Nur unter self._lock bzw. vor dem Start des Tickers aufrufen."""
+        self.data["updated"] = time.time()
+        self._dirty = False
+        try:
+            tmp = STATUS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, STATUS_FILE)
+        except OSError as e:
+            self.log.debug(f"Status-Datei nicht schreibbar ({STATUS_FILE}): {e}")
+
+
+def format_status():
+    """Text für --status aus embycache_status.json."""
+    try:
+        d = json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"Kein Status vorhanden ({STATUS_FILE}) – noch kein Lauf mit --run"
+    ts = lambda t: datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+    alive = Path(f"/proc/{d.get('pid')}").exists()
+    state = d.get("state", "?")
+    if state == "läuft" and not alive:
+        state = "abgebrochen (Prozess existiert nicht mehr)"
+    lines = [f"EmbyCache {d.get('version', '')} – Status: {state}, PID {d.get('pid')}, Modus {str(d.get('mode', '')).upper()}",
+             f"Start {ts(d['started'])}, letzte Aktualisierung {ts(d['updated'])}"
+             + (f", beendet {ts(d['finished'])}" if d.get("finished") else "")]
+    jobs = d.get("jobs") or {}
+    done = d.get("bytes_done", 0) + sum(j.get("done", 0) for j in jobs.values())
+    total = d.get("bytes_total", 0)
+    lines.append(f"Phase: {d.get('phase')}  –  {d.get('files_done', 0)}/{d.get('files_total', 0)} Dateien, "
+                 f"{human(done)} von {human(total)}" + (f" ({done / total * 100:.0f} %)" if total else "")
+                 + (f", {d['files_failed']} Fehler" if d.get("files_failed") else ""))
+    if jobs:
+        lines.append(f"Aktiv ({len(jobs)}):")
+        for j in sorted(jobs.values(), key=lambda x: x.get("index", 0)):
+            pct = j["done"] * 100 // j["size"] if j.get("size") else 0
+            lines.append(f"  [{j.get('index', '?')}/{d.get('files_total', 0)}] {j['disk']:<8} {pct:>3} %  "
+                         f"{human(j['done']):>10} / {human(j['size']):<10} {j.get('speed') or '':>12}  "
+                         f"Rest {j.get('eta') or '?':<8} {j['rel']}")
+    if d.get("recent"):
+        lines.append("Zuletzt fertig:")
+        for r in d["recent"]:
+            lines.append(f"  {'ok    ' if r['ok'] else 'FEHLER'} {r['disk']:<8} {human(r['size']):>10}  "
+                         f"{r['seconds']:>7.1f} s  {r['rel']}")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- Lock / Exclude
