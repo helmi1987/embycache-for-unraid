@@ -53,6 +53,7 @@ Beispiel User Scripts (Unraid):  cd /mnt/user/system/scripts/embycache && python
 """
 import argparse
 import collections
+import contextlib
 import os
 import sys
 import threading
@@ -585,7 +586,10 @@ class Runner:
             protected.update(candidates)
             return
         self.status.phase("Cleanup (Cache -> Array, move-Binary)", len(candidates), self.to_array)
-        rc, stdout, stderr = run_mover(mover, candidates, self.cfg["mover_debug_level"], log)
+        sizes = {str(loc.cache / r): sz for r, sz in listing}
+        tracked = [(p, Path(p).relative_to(loc.cache), sizes.get(p, 0), lambda rel: loc.on_disk(rel)) for p in candidates]
+        with self.track_mover(tracked, "-> ARRAY"):
+            rc, stdout, stderr = run_mover(mover, candidates, self.cfg["mover_debug_level"], log)
         messages = summarize_mover_output(stdout + "\n" + stderr, candidates)
         left_by_reason = {}
         for p in candidates:
@@ -789,7 +793,9 @@ class Runner:
             return
         log.info(f"Befüllen: {len(batch)} Dateien ({human(sum(f.size for f, _ in batch))}) per move-Binary Array -> Cache")
         self.status.phase("Befüllen (Array -> Cache, move-Binary)", len(batch), sum(f.size for f, _ in batch))
-        run_mover(mover, [str(src) for _, src in batch], self.cfg["mover_debug_level"], log)
+        tracked = [(str(src), f.rel, f.size, lambda rel: [loc.on_cache(rel)]) for f, src in batch]
+        with self.track_mover(tracked, "-> CACHE"):
+            run_mover(mover, [str(src) for _, src in batch], self.cfg["mover_debug_level"], log)
         for f, src in batch:
             dst = loc.on_cache(f.rel)
             if dst.exists() and not src.exists():
@@ -803,6 +809,62 @@ class Runner:
                 log.warning(f"Nicht auf den Cache verschoben (in Benutzung, oder das Binary kennt keinen Pool für diesen Share?): {f.rel}")
         if self.copied == 0:
             log.warning("Das move-Binary hat nichts auf den Cache verschoben – fill_tool=rsync verwenden oder mover_debug_level=1 setzen und Log prüfen")
+
+    @contextlib.contextmanager
+    def track_mover(self, items, label):
+        """Überwacht einen laufenden move-Binary-Aufruf: alle 2 s wird geprüft, welche Quellen schon weg sind.
+        Das Binary arbeitet die Pfade der Reihe nach ab – die erste noch vorhandene Quelle gilt als aktuelle Datei;
+        ihr Fortschritt ist die Grösse am Ziel, soweit dort schon sichtbar. items: (quelle, rel, size, targets(rel))."""
+        stop = threading.Event()
+        count = len(items)
+
+        def monitor():
+            pending = list(enumerate(items, 1))
+            current = None
+            last_done = 0
+            t_current = time.time()
+            while True:
+                finished = stop.wait(2)
+                still = []
+                for i, (src, rel, size, targets) in pending:
+                    if os.path.exists(src):
+                        still.append((i, (src, rel, size, targets)))
+                        continue
+                    key = f"m{i}"
+                    if current != key:
+                        self.status.job_start(key, rel, "move", size, i)
+                    self.status.job_end(key, True)
+                    secs = time.time() - t_current if current == key else 0
+                    log.info(f"[{i}/{count}] {label} fertig {human(size):>10}"
+                             + (f" in {secs:.0f} s" if secs else "") + f"  {rel}")
+                    if current == key:
+                        current = None
+                    last_done = max(last_done, i)
+                pending = still
+                if finished or not pending:
+                    break
+                # aktuelle Datei = erste noch vorhandene nach der zuletzt fertigen (übersprungene bleiben zurück)
+                i, (src, rel, size, targets) = next((x for x in pending if x[0] > last_done), pending[0])
+                key = f"m{i}"
+                if current != key:
+                    if current:
+                        self.status.job_end(current, False)  # übersprungen (in Benutzung o.ä.) – Endergebnis prüft unten
+                    current, t_current = key, time.time()
+                    self.status.job_start(key, rel, "move", size, i)
+                    log.info(f"[{i}/{count}] {label} läuft {human(size):>10}  {rel}")
+                try:
+                    done = max((t.stat().st_size for t in targets(rel) if t.is_file()), default=0)
+                except OSError:
+                    done = 0
+                self.status.job_progress(key, done)
+
+        t = threading.Thread(target=monitor, name="mover-monitor", daemon=True)
+        t.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            t.join(timeout=30)
 
     @staticmethod
     def _disk_root(src, loc, from_disk):
@@ -951,6 +1013,8 @@ def main():
     parser.add_argument("--watch", type=float, nargs="?", const=2, metavar="SEK",
                         help="mit --status: alle SEK Sekunden neu anzeigen (Default 2), Ende mit Ctrl+C")
     args = parser.parse_args()
+    if args.watch and not args.status:
+        parser.error("--watch nur zusammen mit --status (in einer zweiten Shell, während --run läuft)")
     if args.status:
         if not args.watch:
             print(format_status())

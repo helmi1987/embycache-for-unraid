@@ -113,7 +113,9 @@ Zuletzt fertig:
   ok     disk1       2.86 GB     16.0 s  Serien/Show1/E2.mkv
 ```
 
-Im Log steht pro Datei `[n/N] Start disk3 …` und `[n/N] Fertig … in X s (Y/s)`, dazu alle `status_log_interval` Sekunden eine Zeile «Fortschritt …» mit Gesamtstand, Rate, Restzeit und den aktiven Kopien. Der Fortschritt innerhalb einer Datei kommt aus `--info=progress2` von rsync (reine Ausgabe-Option, ändert nichts am Kopieren; `copy_progress: false` schaltet sie ab, dann zeigt der Status nur ganze Dateien). Endet der Prozess ohne Abschluss, zeigt `--status` «abgebrochen».
+Im Log steht pro Datei `[n/N] Start disk3 …` und `[n/N] Fertig … in X s (Y/s)`, dazu alle `status_log_interval` Sekunden eine Zeile «Fortschritt …» mit Gesamtstand, Rate, Restzeit und den aktiven Kopien. Der Fortschritt innerhalb einer Datei kommt aus `--info=progress2` von rsync (reine Ausgabe-Option, ändert nichts am Kopieren; `copy_progress: false` schaltet sie ab, dann zeigt der Status nur ganze Dateien). Endet der Prozess ohne Abschluss, zeigt `--status` «abgebrochen». `--watch` funktioniert nur zusammen mit `--status` (zweite Shell), nicht mit `--run`.
+
+Beim move-Binary (`cleanup_tool: mover`, `fill_tool: mover`) gibt es keine Fortschrittsausgabe. Das Script prüft deshalb alle 2 s, welche Quellen schon weg sind: Log-Zeilen `[n/N] -> ARRAY läuft …` / `… fertig … in X s`, und im Status die aktuelle Datei mit der Grösse, die am Ziel schon sichtbar ist (Cleanup: `/mnt/diskN/<Datei>`, Befüllen: Pool). Die aktuelle Datei ist abgeleitet (das Binary arbeitet die Pfade der Reihe nach ab), nicht vom Binary gemeldet.
 
 **Parallel (nur `fill_tool: rsync`).** Die Dateien werden nach Quell-Disk (`/mnt/diskN`, auch bei `array_source: user0` ermittelt) gruppiert. `parallel_per_disk` = gleichzeitige Kopien pro Disk, `parallel_total` = Obergrenze über alle Disks (0 = keine). Beispiel `parallel_per_disk: 1`, `parallel_total: 4`: bis zu 4 Disks lesen gleichzeitig, jede eine Datei. Der Freiplatz-Check passiert vor dem Start für alle Kopien zusammen (geplante Kopien werden abgezogen). Drei rsync-Fehler in Folge stoppen neue Kopien, laufende werden fertig.
 
