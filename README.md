@@ -1,5 +1,10 @@
 # 🎬 EmbyCache für Unraid
 
+> [!IMPORTANT]
+> **Dieses Repository ist archiviert und wird nicht mehr gepflegt.**
+> Nachfolger: **[MediaCache für Unraid](https://github.com/helmi1987/mediacache-for-unraid)** – gleiche Logik, unterstützt Emby, Jellyfin und Plex.
+> Umstieg: Dateien und Config heissen dort `mediacache_*` statt `embycache_*`, Umgebungsvariablen `MEDIACACHE_*` statt `EMBYCACHE_*`. Bestehende `embycache_settings.json` kann als `mediacache_settings.json` übernommen werden (Instanzen ohne `type` gelten als Emby).
+
 Verschiebt die Medien, die Emby-Benutzer als Nächstes sehen werden («Weiterschauen», die nächsten Folgen, Favoriten-Serien), vom Array auf den Cache-Pool und räumt sie wieder aufs Array, sobald sie nicht mehr gebraucht werden. Die Array-Platten können dadurch schlafen, und die Wiedergabe startet ohne Spin-up.
 
 Emby merkt davon nichts, weil es die Medien über `/mnt/user/...` sieht – egal ob eine Datei gerade auf dem Pool oder auf einer Array-Disk liegt.
